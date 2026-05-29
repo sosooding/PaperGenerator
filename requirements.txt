@@ -1,0 +1,37 @@
+# Core LangChain & LangGraph
+langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=3.1.0
+langchain-google-genai>=2.0.0
+langchain-core>=0.3.0
+langsmith>=0.1.0
+
+# Vector Database & Embeddings
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# Paper Retrieval
+arxiv>=2.1.0
+semanticscholar>=0.8.0
+
+# UI
+streamlit>=1.39.0
+
+# Utilities
+python-dotenv>=1.0.0
+tenacity>=9.0.0
+pydantic>=2.0.0
+
+# Evaluation
+transformers>=4.45.0
+torch>=2.0.0
+bert-score>=0.3.13
+
+# Document Generation
+pypandoc>=1.13
+
+# Development
+pytest>=8.0.0
+pytest-cov>=6.0.0
+pytest-asyncio>=0.24.0
+black>=24.0.0
+ruff>=0.7.0
