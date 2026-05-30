@@ -2,45 +2,145 @@
 Main LangGraph workflow for research paper generation.
 """
 
+import json
+import logging
 from typing import Literal
+
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from src.utils.state import AgentState
 from src.utils.config import Config
+from src.retrieval.paper_fetcher import fetch_papers_for_queries
+from src.retrieval.vector_store import VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Node Implementations (Stubs for Phase 1)
+# Node Implementations
 # ============================================================================
 
 def planner_node(state: AgentState) -> AgentState:
     """
-    Decompose research question into sub-queries.
-
-    Phase 2 will implement:
-    - Gemini call to decompose research_question into 6-8 sub-queries
-    - Parse response into list
-    - Update state.sub_queries
+    Decompose the research question into 6-8 sub-queries using Gemini.
+    Falls back to the raw question on parse failure.
     """
-    print(f"[PLANNER] Processing: {state.get('research_question', 'N/A')}")
-    return {**state, "current_phase": "planning"}
+    research_question = state.get("research_question", "")
+    print(f"[PLANNER] Decomposing: {research_question!r}")
+
+    llm = ChatGoogleGenerativeAI(
+        model=Config.GEMINI_MODEL,
+        google_api_key=Config.GOOGLE_API_KEY,
+        temperature=0.3,
+    )
+
+    prompt = (
+        "You are a research assistant specialising in graph theory.\n\n"
+        "Break the following research question into 6-8 specific sub-queries suitable "
+        "for searching academic literature databases (ArXiv, Semantic Scholar).\n"
+        "Each sub-query should cover a distinct aspect of the topic.\n"
+        "Return ONLY a valid JSON array of strings — no explanation, no markdown fences.\n\n"
+        f"Research question: {research_question}"
+    )
+
+    errors = list(state.get("errors", []))
+    sub_queries = [research_question]  # safe fallback
+
+    try:
+        response = llm.invoke(prompt)
+        # langchain-google-genai may return content as a list of parts or a plain string
+        raw = response.content
+        if isinstance(raw, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw
+            )
+        else:
+            content = str(raw)
+        content = content.strip()
+
+        # Strip accidental markdown code fences
+        if content.startswith("```"):
+            lines = content.splitlines()
+            content = "\n".join(
+                line for line in lines if not line.strip().startswith("```")
+            ).strip()
+
+        parsed = json.loads(content)
+        if isinstance(parsed, list) and parsed:
+            sub_queries = [str(q) for q in parsed]
+        else:
+            raise ValueError("Parsed value is not a non-empty list")
+    except Exception as exc:
+        msg = f"Planner LLM parse error ({exc}); using research question as single query"
+        logger.warning(msg)
+        errors.append(msg)
+
+    print(f"[PLANNER] Generated {len(sub_queries)} sub-queries")
+    return {**state, "sub_queries": sub_queries, "current_phase": "planning", "errors": errors}
 
 
 def retriever_node(state: AgentState) -> AgentState:
     """
-    Retrieve relevant papers from ArXiv and Semantic Scholar.
-
-    Phase 2 will implement:
-    - Fetch papers from ArXiv (cs.DM, math.CO categories)
-    - Fetch papers from Semantic Scholar
-    - Embed abstracts using text-embedding-004
-    - Store in ChromaDB
-    - Run similarity search for each sub-query
-    - Update state.retrieved_papers
+    Fetch papers from ArXiv and Semantic Scholar, embed with text-embedding-004,
+    store in ChromaDB, then return the top relevant papers via similarity search.
     """
-    print(f"[RETRIEVER] Sub-queries: {len(state.get('sub_queries', []))}")
-    return {**state, "current_phase": "retrieval"}
+    sub_queries = state.get("sub_queries", [])
+    errors = list(state.get("errors", []))
+
+    if not sub_queries:
+        msg = "No sub-queries available; skipping retrieval"
+        logger.warning(msg)
+        errors.append(msg)
+        return {**state, "current_phase": "retrieval", "errors": errors}
+
+    print(f"[RETRIEVER] Fetching papers for {len(sub_queries)} sub-queries")
+
+    # 1. Fetch raw papers from both sources
+    papers = fetch_papers_for_queries(sub_queries)
+    print(f"[RETRIEVER] Fetched {len(papers)} unique papers")
+
+    if not papers:
+        msg = "No papers retrieved from ArXiv or Semantic Scholar"
+        logger.warning(msg)
+        errors.append(msg)
+        return {
+            **state,
+            "retrieved_papers": [],
+            "embeddings_ready": False,
+            "current_phase": "retrieval",
+            "errors": errors,
+        }
+
+    # 2. Embed and store in ChromaDB (collection is cleared fresh each run by default)
+    vector_store = VectorStore()
+    vector_store.embed_and_store(papers)
+
+    if vector_store.collection.count() == 0:
+        msg = "Embedding failed for all batches — ChromaDB collection is empty"
+        logger.error(msg)
+        errors.append(msg)
+        return {
+            **state,
+            "retrieved_papers": [],
+            "embeddings_ready": False,
+            "current_phase": "retrieval",
+            "errors": errors,
+        }
+
+    # 3. Similarity search to rank, deduplicate, and threshold-filter
+    relevant_papers = vector_store.get_relevant_papers(sub_queries)
+    print(f"[RETRIEVER] Selected {len(relevant_papers)} relevant papers after similarity search")
+
+    return {
+        **state,
+        "retrieved_papers": relevant_papers,
+        "embeddings_ready": True,
+        "current_phase": "retrieval",
+        "errors": errors,
+    }
 
 
 def gap_finder_node(state: AgentState) -> AgentState:

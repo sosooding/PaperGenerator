@@ -22,7 +22,7 @@ class Config:
 
     # Model Configuration
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/text-embedding-004")
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
 
     # Rate Limiting
     GEMINI_RPM_LIMIT = int(os.getenv("GEMINI_RPM_LIMIT", "15"))
@@ -36,6 +36,8 @@ class Config:
 
     # Retrieval Settings
     TOP_K_PAPERS = 5
+    MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.5"))
+    CLEAR_DB_ON_RUN = os.getenv("CLEAR_DB_ON_RUN", "true").lower() == "true"
     ARXIV_CATEGORY_FILTERS = ["cs.DM", "math.CO"]  # Discrete Math, Combinatorics
     SEMANTIC_SCHOLAR_FIELD = "Mathematics"
 

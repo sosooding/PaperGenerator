@@ -11,7 +11,7 @@ from src.utils.config import Config
 def main():
     """Run the paper generation workflow."""
     # Example research question
-    research_question = "What are the applications of chromatic polynomials in network theory?"
+    research_question = "How can I efficiently query connected components in large temporal graphs with scalable and maintainable indices?"
 
     print("=" * 80)
     print("Graph Theory Research Paper Generator")
@@ -41,6 +41,16 @@ def main():
             print("\nWorkflow completed successfully!")
             print(f"Final phase: {final_state.get('current_phase')}")
             print(f"Revision count: {final_state.get('revision_count')}")
+
+            # Show retrieved papers
+            retrieved = final_state.get("retrieved_papers", [])
+            print(f"\nRetrieved papers: {len(retrieved)}")
+            for i, paper in enumerate(retrieved[:5], 1):
+                score = paper.get("relevance_score")
+                score_str = f"{score:.3f}" if score is not None else "N/A"
+                print(f"  {i}. [{score_str}] {paper['title'][:75]}")
+            if len(retrieved) > 5:
+                print(f"  ... and {len(retrieved) - 5} more")
 
             # Show errors if any
             if final_state.get("errors"):
