@@ -33,7 +33,7 @@ def planner_node(state: AgentState) -> AgentState:
     research_question = state.get("research_question", "")
     print(f"[PLANNER] Decomposing: {research_question!r}")
 
-    llm = get_llm(temperature=0.3)
+    llm = get_llm(temperature=0)
 
     prompt = (
         "You are a research assistant specialising in graph theory.\n\n"

@@ -24,7 +24,7 @@ class Config:
 
     # LLM Configuration
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google")   # google | anthropic | openai
-    LLM_MODEL = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+    LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
 
     # Rate Limiting

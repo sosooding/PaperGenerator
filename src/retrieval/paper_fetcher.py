@@ -48,7 +48,7 @@ def fetch_arxiv_papers(query: str, max_results: int = 20) -> List[Paper]:
     search = arxiv.Search(
         query=full_query,
         max_results=max_results,
-        sort_by=arxiv.SortCriterion.Relevance,
+        sort_by=arxiv.SortCriterion.SubmittedDate,
     )
 
     papers: List[Paper] = []
