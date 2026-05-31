@@ -425,13 +425,13 @@ class TestVectorStore:
 # ---------------------------------------------------------------------------
 
 class TestPlannerNode:
-    @patch("src.agents.graph.ChatGoogleGenerativeAI")
-    def test_parses_json_sub_queries(self, mock_llm_cls):
+    @patch("src.agents.graph.get_llm")
+    def test_parses_json_sub_queries(self, mock_get_llm):
         from src.agents.graph import planner_node
         from src.agents.graph import get_initial_state
 
         mock_llm = MagicMock()
-        mock_llm_cls.return_value = mock_llm
+        mock_get_llm.return_value = mock_llm
         mock_llm.invoke.return_value = MagicMock(
             content='["sub-query 1", "sub-query 2", "sub-query 3"]'
         )
@@ -443,13 +443,13 @@ class TestPlannerNode:
         assert len(result["sub_queries"]) == 3
         assert result["sub_queries"][0] == "sub-query 1"
 
-    @patch("src.agents.graph.ChatGoogleGenerativeAI")
-    def test_falls_back_on_bad_json(self, mock_llm_cls):
+    @patch("src.agents.graph.get_llm")
+    def test_falls_back_on_bad_json(self, mock_get_llm):
         from src.agents.graph import planner_node
         from src.agents.graph import get_initial_state
 
         mock_llm = MagicMock()
-        mock_llm_cls.return_value = mock_llm
+        mock_get_llm.return_value = mock_llm
         mock_llm.invoke.return_value = MagicMock(content="not valid json at all")
 
         state = get_initial_state("Research question fallback test")
@@ -458,13 +458,13 @@ class TestPlannerNode:
         assert result["sub_queries"] == ["Research question fallback test"]
         assert len(result["errors"]) == 1
 
-    @patch("src.agents.graph.ChatGoogleGenerativeAI")
-    def test_strips_markdown_fences(self, mock_llm_cls):
+    @patch("src.agents.graph.get_llm")
+    def test_strips_markdown_fences(self, mock_get_llm):
         from src.agents.graph import planner_node
         from src.agents.graph import get_initial_state
 
         mock_llm = MagicMock()
-        mock_llm_cls.return_value = mock_llm
+        mock_get_llm.return_value = mock_llm
         mock_llm.invoke.return_value = MagicMock(
             content='```json\n["q1", "q2"]\n```'
         )

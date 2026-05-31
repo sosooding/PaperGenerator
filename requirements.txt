@@ -1,9 +1,13 @@
 # Core LangChain & LangGraph
 langgraph>=0.2.0
 langgraph-checkpoint-sqlite>=3.1.0
-langchain-google-genai>=2.0.0
 langchain-core>=0.3.0
 langsmith>=0.1.0
+
+# LLM providers (install the one(s) you need)
+langchain-google-genai>=2.0.0   # LLM_PROVIDER=google  (default)
+langchain-anthropic>=0.3.0      # LLM_PROVIDER=anthropic
+langchain-openai>=0.2.0         # LLM_PROVIDER=openai
 
 # Vector Database & Embeddings
 chromadb>=0.5.0

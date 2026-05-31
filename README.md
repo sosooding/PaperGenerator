@@ -15,7 +15,7 @@ An AI-powered system that generates academic research papers in graph theory usi
 ## Tech Stack
 
 - **Orchestration**: LangGraph
-- **LLM**: Google Gemini (configurable via `GEMINI_MODEL`)
+- **LLM**: Configurable — Google Gemini, Anthropic Claude, or OpenAI GPT
 - **Vector Store**: ChromaDB
 - **Embeddings**: Google text-embedding-004
 - **Paper Sources**: ArXiv, Semantic Scholar
@@ -43,19 +43,22 @@ LANGCHAIN_API_KEY=your_langsmith_api_key
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_PROJECT=graph-theory-paper-gen
 
-# Optional overrides (these have sensible defaults)
-GEMINI_MODEL=gemini-1.5-flash      # LLM for planning, gap finding, writing
+# LLM provider — choose one: google (default), anthropic, openai
+LLM_PROVIDER=google
+LLM_MODEL=gemini-1.5-flash
+
+# Optional overrides
 EMBEDDING_MODEL=models/gemini-embedding-001
-MAX_GAPS=5                         # Max research gaps to identify
+MAX_GAPS=5
 ```
 
-Common model options for `GEMINI_MODEL`:
+Switch providers by changing `LLM_PROVIDER` and `LLM_MODEL`:
 
-| Model | Speed | Quality | Use case |
+| Provider | `LLM_PROVIDER` | Example `LLM_MODEL` | Key needed |
 |---|---|---|---|
-| `gemini-2.0-flash-lite` | Fastest | Good | Rapid testing |
-| `gemini-1.5-flash` | Fast | Better | Default |
-| `gemini-1.5-pro` | Slower | Best | Final runs |
+| Google Gemini | `google` | `gemini-1.5-flash`, `gemini-2.0-flash-lite` | `GOOGLE_API_KEY` |
+| Anthropic Claude | `anthropic` | `claude-3-5-haiku-20241022`, `claude-opus-4-8-20250514` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai` | `gpt-4o-mini`, `gpt-4o` | `OPENAI_API_KEY` |
 
 ## Usage
 

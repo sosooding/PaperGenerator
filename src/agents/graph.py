@@ -7,13 +7,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt
 
 from src.utils.state import AgentState, ResearchGap
 from src.utils.config import Config
+from src.utils.llm import get_llm
 from src.retrieval.paper_fetcher import fetch_papers_for_queries
 from src.retrieval.vector_store import VectorStore
 from src.gap_finding.gap_analyzer import find_research_gaps
@@ -33,11 +33,7 @@ def planner_node(state: AgentState) -> AgentState:
     research_question = state.get("research_question", "")
     print(f"[PLANNER] Decomposing: {research_question!r}")
 
-    llm = ChatGoogleGenerativeAI(
-        model=Config.GEMINI_MODEL,
-        google_api_key=Config.GOOGLE_API_KEY,
-        temperature=0.3,
-    )
+    llm = get_llm(temperature=0.3)
 
     prompt = (
         "You are a research assistant specialising in graph theory.\n\n"

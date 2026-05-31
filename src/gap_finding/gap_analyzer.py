@@ -9,9 +9,8 @@ import json
 import logging
 from typing import List
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-
 from src.utils.config import Config
+from src.utils.llm import get_llm
 from src.utils.state import Paper, ResearchGap
 
 logger = logging.getLogger(__name__)
@@ -126,13 +125,10 @@ def find_research_gaps(papers: List[Paper], research_question: str) -> List[Rese
         f"Research question: {research_question}"
     )
 
-    llm = ChatGoogleGenerativeAI(
-        model=Config.GEMINI_MODEL,
-        google_api_key=Config.GOOGLE_API_KEY,
-        temperature=0.3,
-    )
+    llm = get_llm(temperature=0.3)
 
-    logger.info("Calling Gemini for gap analysis on %d papers", len(papers))
+    logger.info("Calling LLM (%s/%s) for gap analysis on %d papers",
+                Config.LLM_PROVIDER, Config.LLM_MODEL, len(papers))
     response = llm.invoke(prompt)
 
     # Normalise content — langchain-google-genai may return list-of-parts

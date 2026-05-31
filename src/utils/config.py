@@ -15,13 +15,16 @@ class Config:
     # API Keys
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY")
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
     # LangSmith Tracing
     LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "true")
     LANGCHAIN_PROJECT = os.getenv("LANGCHAIN_PROJECT", "graph-theory-paper-gen")
 
-    # Model Configuration
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    # LLM Configuration
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google")   # google | anthropic | openai
+    LLM_MODEL = os.getenv("LLM_MODEL", "gemini-1.5-flash")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
 
     # Rate Limiting

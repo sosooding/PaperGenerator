@@ -252,40 +252,40 @@ class TestFindResearchGaps:
          "supporting_evidence": ["10.1/b"], "novelty_score": 0.6},
     ])
 
-    def _mock_llm(self, mock_cls, content):
+    def _mock_llm(self, mock_get_llm, content):
         mock_llm = MagicMock()
-        mock_cls.return_value = mock_llm
+        mock_get_llm.return_value = mock_llm
         mock_llm.invoke.return_value = MagicMock(content=content)
         return mock_llm
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_happy_path_returns_gaps(self, mock_cls):
-        mock_llm = self._mock_llm(mock_cls, self._VALID_RESPONSE)
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_happy_path_returns_gaps(self, mock_get_llm):
+        mock_llm = self._mock_llm(mock_get_llm, self._VALID_RESPONSE)
         papers = [make_paper(doi="10.1/a"), make_paper(doi="10.1/b")]
         gaps = find_research_gaps(papers, "What are open problems?")
         assert len(gaps) == 2
         assert gaps[0]["gap_title"] == "Gap A"
         mock_llm.invoke.assert_called_once()
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_empty_papers_returns_empty_no_llm_call(self, mock_cls):
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_empty_papers_returns_empty_no_llm_call(self, mock_get_llm):
         mock_llm = MagicMock()
-        mock_cls.return_value = mock_llm
+        mock_get_llm.return_value = mock_llm
         result = find_research_gaps([], "Any question")
         assert result == []
         mock_llm.invoke.assert_not_called()
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_strips_markdown_fences_from_response(self, mock_cls):
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_strips_markdown_fences_from_response(self, mock_get_llm):
         fenced = f"```json\n{self._VALID_RESPONSE}\n```"
-        self._mock_llm(mock_cls, fenced)
+        self._mock_llm(mock_get_llm, fenced)
         gaps = find_research_gaps([make_paper()], "question")
         assert len(gaps) == 2
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_handles_list_of_parts_response(self, mock_cls):
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_handles_list_of_parts_response(self, mock_get_llm):
         mock_llm = MagicMock()
-        mock_cls.return_value = mock_llm
+        mock_get_llm.return_value = mock_llm
         # Simulate list-of-parts content
         mock_llm.invoke.return_value = MagicMock(
             content=[{"text": self._VALID_RESPONSE}]
@@ -293,45 +293,45 @@ class TestFindResearchGaps:
         gaps = find_research_gaps([make_paper()], "question")
         assert len(gaps) == 2
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_llm_exception_propagates(self, mock_cls):
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_llm_exception_propagates(self, mock_get_llm):
         mock_llm = MagicMock()
-        mock_cls.return_value = mock_llm
+        mock_get_llm.return_value = mock_llm
         mock_llm.invoke.side_effect = RuntimeError("API failure")
         with pytest.raises(RuntimeError):
             find_research_gaps([make_paper()], "question")
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_bad_json_raises(self, mock_cls):
-        self._mock_llm(mock_cls, "this is not json")
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_bad_json_raises(self, mock_get_llm):
+        self._mock_llm(mock_get_llm, "this is not json")
         with pytest.raises(json.JSONDecodeError):
             find_research_gaps([make_paper()], "question")
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_novelty_clamped_in_returned_gaps(self, mock_cls):
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_novelty_clamped_in_returned_gaps(self, mock_get_llm):
         raw = json.dumps([{"gap_title": "G", "description": "D",
                            "supporting_evidence": [], "novelty_score": 99.0}])
-        self._mock_llm(mock_cls, raw)
+        self._mock_llm(mock_get_llm, raw)
         gaps = find_research_gaps([make_paper()], "question")
         assert gaps[0]["novelty_score"] == pytest.approx(1.0)
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_title_used_when_no_doi(self, mock_cls):
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_title_used_when_no_doi(self, mock_get_llm):
         """Corpus should include the paper title as the evidence ID when DOI is absent."""
-        self._mock_llm(mock_cls, self._VALID_RESPONSE)
+        self._mock_llm(mock_get_llm, self._VALID_RESPONSE)
         paper = make_paper(title="Planar Graph Study", doi="")
         find_research_gaps([paper], "question")
-        # Verify title appears in the prompt sent to Gemini
-        prompt_arg = mock_cls.return_value.invoke.call_args[0][0]
+        # Verify title appears in the prompt sent to the LLM
+        prompt_arg = mock_get_llm.return_value.invoke.call_args[0][0]
         assert "Planar Graph Study" in prompt_arg
 
-    @patch("src.gap_finding.gap_analyzer.ChatGoogleGenerativeAI")
-    def test_uses_config_max_gaps(self, mock_cls):
+    @patch("src.gap_finding.gap_analyzer.get_llm")
+    def test_uses_config_max_gaps(self, mock_get_llm):
         """Prompt should reference Config.MAX_GAPS."""
         from src.utils.config import Config
-        self._mock_llm(mock_cls, self._VALID_RESPONSE)
+        self._mock_llm(mock_get_llm, self._VALID_RESPONSE)
         find_research_gaps([make_paper()], "question")
-        prompt_arg = mock_cls.return_value.invoke.call_args[0][0]
+        prompt_arg = mock_get_llm.return_value.invoke.call_args[0][0]
         assert str(Config.MAX_GAPS) in prompt_arg
 
 

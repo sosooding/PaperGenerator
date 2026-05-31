@@ -16,9 +16,11 @@ def test_config_has_api_keys():
 
 def test_config_model_settings():
     """Test model configuration."""
-    assert Config.GEMINI_MODEL is not None
+    assert Config.LLM_PROVIDER is not None
+    assert Config.LLM_MODEL is not None
     assert Config.EMBEDDING_MODEL is not None
-    assert "gemini" in Config.GEMINI_MODEL.lower() or "flash" in Config.GEMINI_MODEL.lower()
+    assert Config.LLM_PROVIDER in ("google", "anthropic", "openai")
+    assert len(Config.LLM_MODEL) > 0
     assert "embedding" in Config.EMBEDDING_MODEL.lower()
 
 
