@@ -4,16 +4,19 @@ Main LangGraph workflow for research paper generation.
 
 import json
 import logging
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Literal, Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import interrupt
 
-from src.utils.state import AgentState
+from src.utils.state import AgentState, ResearchGap
 from src.utils.config import Config
 from src.retrieval.paper_fetcher import fetch_papers_for_queries
 from src.retrieval.vector_store import VectorStore
+from src.gap_finding.gap_analyzer import find_research_gaps
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +135,9 @@ def retriever_node(state: AgentState) -> AgentState:
 
     # 3. Similarity search to rank, deduplicate, and threshold-filter
     relevant_papers = vector_store.get_relevant_papers(sub_queries)
-    print(f"[RETRIEVER] Selected {len(relevant_papers)} relevant papers after similarity search")
+    print(f"[RETRIEVER] Selected {len(relevant_papers)} relevant papers:")
+    for paper in relevant_papers:
+        print(f"  [{paper.get('year', '?')}] {paper['title']}")
 
     return {
         **state,
@@ -145,16 +150,103 @@ def retriever_node(state: AgentState) -> AgentState:
 
 def gap_finder_node(state: AgentState) -> AgentState:
     """
-    Identify research gaps from retrieved papers.
-
-    Phase 3 will implement:
-    - Send all approved abstracts to Gemini (1M context window)
-    - Identify open conjectures, unexplored graph families, missing proofs
-    - Structure gaps as JSON with novelty scores
-    - Update state.gaps
+    Send all retrieved paper abstracts to Gemini and identify research gaps.
+    Populates state.gaps; gap selection happens in gap_selector_node.
     """
-    print(f"[GAP_FINDER] Papers: {len(state.get('retrieved_papers', []))}")
-    return {**state, "current_phase": "gap_finding"}
+    papers = state.get("retrieved_papers", [])
+    research_question = state.get("research_question", "")
+    errors = list(state.get("errors", []))
+
+    print(f"[GAP_FINDER] Analyzing {len(papers)} papers for research gaps")
+
+    if not papers:
+        msg = "gap_finder: no retrieved papers; skipping gap analysis"
+        logger.warning(msg)
+        errors.append(msg)
+        return {**state, "gaps": [], "selected_gap": None,
+                "current_phase": "gap_finding", "errors": errors}
+
+    try:
+        gaps = find_research_gaps(papers, research_question)
+    except Exception as exc:
+        msg = f"gap_finder: LLM error ({exc}); no gaps identified"
+        logger.error(msg)
+        errors.append(msg)
+        return {**state, "gaps": [], "selected_gap": None,
+                "current_phase": "gap_finding", "errors": errors}
+
+    print(f"[GAP_FINDER] Found {len(gaps)} gaps")
+    return {**state, "gaps": gaps, "selected_gap": None,
+            "current_phase": "gap_finding", "errors": errors}
+
+
+def gap_selector_node(state: AgentState) -> AgentState:
+    """
+    Human-in-the-loop: display ranked gaps and pause for user selection.
+
+    The graph pauses here via LangGraph interrupt. Resume by calling:
+        graph.invoke(Command(resume=<choice>), config=...)
+    where <choice> is a 1-based index (e.g. "2") or an exact gap_title string.
+    """
+    gaps = state.get("gaps", [])
+    sorted_gaps = sorted(gaps, key=lambda g: g["novelty_score"], reverse=True)
+
+    if not sorted_gaps:
+        print("[GAP_SELECTOR] No gaps available; proceeding with no selected gap")
+        return {**state, "selected_gap": None, "current_phase": "gap_selection"}
+
+    gap_list = [
+        {
+            "index": i + 1,
+            "gap_title": g["gap_title"],
+            "novelty_score": g["novelty_score"],
+            "description": g["description"],
+            "supporting_evidence": g["supporting_evidence"],
+        }
+        for i, g in enumerate(sorted_gaps)
+    ]
+
+    user_choice = interrupt({
+        "message": (
+            f"Found {len(sorted_gaps)} research gaps (ranked by novelty score). "
+            "Enter the number of the gap you want to investigate:"
+        ),
+        "gaps": gap_list,
+    })
+
+    # Resolve selection: accept 1-based integer or exact gap_title string
+    selected_gap: Optional[ResearchGap] = None
+    try:
+        idx = int(user_choice) - 1
+        if 0 <= idx < len(sorted_gaps):
+            selected_gap = sorted_gaps[idx]
+    except (ValueError, TypeError):
+        title = str(user_choice).strip().lower()
+        for g in sorted_gaps:
+            if g["gap_title"].lower() == title:
+                selected_gap = g
+                break
+
+    if selected_gap is None:
+        logger.warning("gap_selector: unrecognised choice %r; defaulting to highest novelty", user_choice)
+        selected_gap = sorted_gaps[0]
+
+    print(f"[GAP_SELECTOR] Selected: {selected_gap['gap_title']!r} "
+          f"(novelty={selected_gap['novelty_score']:.2f})")
+
+    human_decisions = list(state.get("human_decisions", []))
+    human_decisions.append({
+        "checkpoint_name": "gap_selection",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "approved_papers": [],
+        "removed_papers": [],
+        "selected_gap": selected_gap,
+        "edited_sections": [],
+        "notes": str(user_choice),
+    })
+
+    return {**state, "selected_gap": selected_gap,
+            "human_decisions": human_decisions, "current_phase": "gap_selection"}
 
 
 def writer_node(state: AgentState) -> AgentState:
@@ -246,15 +338,18 @@ def create_graph(checkpointer=None) -> StateGraph:
     Build the LangGraph workflow.
 
     Nodes:
-    1. planner -> Query decomposition
-    2. retriever -> Paper retrieval (with interrupt for human checkpoint 1)
-    3. gap_finder -> Research gap identification (with interrupt for human checkpoint 2)
-    4. writer -> Section-by-section writing
-    5. critic -> Grounding & coherence check
-    6. formatter -> Citation formatting & PDF generation (with interrupt for human checkpoint 3)
+    1. planner       -> Query decomposition
+    2. retriever     -> Paper retrieval
+    3. gap_finder    -> Research gap identification (calls Gemini)
+    4. gap_selector  -> Human-in-the-loop: user picks a gap (interrupt)
+    5. writer        -> Section-by-section writing
+    6. critic        -> Grounding & coherence check
+    7. formatter     -> Citation formatting & PDF generation
 
     Flow:
-    planner -> retriever -> gap_finder -> writer -> critic -> [revise loop or formatter] -> END
+    planner -> retriever -> gap_finder -> gap_selector* -> writer
+           -> critic -> [revise loop or formatter] -> END
+    (* pauses for user input via LangGraph interrupt)
     """
     # Create graph
     workflow = StateGraph(AgentState)
@@ -263,6 +358,7 @@ def create_graph(checkpointer=None) -> StateGraph:
     workflow.add_node("planner", planner_node)
     workflow.add_node("retriever", retriever_node)
     workflow.add_node("gap_finder", gap_finder_node)
+    workflow.add_node("gap_selector", gap_selector_node)
     workflow.add_node("writer", writer_node)
     workflow.add_node("critic", critic_node)
     workflow.add_node("formatter", formatter_node)
@@ -271,7 +367,8 @@ def create_graph(checkpointer=None) -> StateGraph:
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "retriever")
     workflow.add_edge("retriever", "gap_finder")
-    workflow.add_edge("gap_finder", "writer")
+    workflow.add_edge("gap_finder", "gap_selector")
+    workflow.add_edge("gap_selector", "writer")
     workflow.add_edge("writer", "critic")
 
     # Conditional edge: critic -> writer (revise) or formatter (accept)

@@ -4,6 +4,7 @@ Unit tests for LangGraph workflow.
 
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
 import tempfile
 import os
 
@@ -13,6 +14,7 @@ from src.agents.graph import (
     planner_node,
     retriever_node,
     gap_finder_node,
+    gap_selector_node,
     writer_node,
     critic_node,
     formatter_node,
@@ -204,8 +206,12 @@ def test_graph_invoke_end_to_end():
 
             config = {"configurable": {"thread_id": "test-thread"}}
 
-            # Execute graph
+            # Execute graph — may pause at gap_selector if gaps are found
             result = graph.invoke(initial_state, config)
+
+            # If the graph paused for interactive gap selection, resume with "1" (first gap)
+            if result.get("current_phase") != "formatting":
+                result = graph.invoke(Command(resume="1"), config)
 
             # Verify result
             assert result is not None

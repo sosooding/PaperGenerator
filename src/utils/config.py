@@ -45,6 +45,7 @@ class Config:
     MAX_REVISION_CYCLES = 3
     MIN_CRITIC_SCORE = 7.0
     MAX_FLAGGED_SENTENCES = 3
+    MAX_GAPS = int(os.getenv("MAX_GAPS", "5"))
 
     # Section Word Counts
     MIN_WORD_COUNTS = {

@@ -5,7 +5,8 @@ An AI-powered system that generates academic research papers in graph theory usi
 ## Features
 
 - Automated literature retrieval from ArXiv and Semantic Scholar
-- Research gap identification using LLM analysis
+- Research gap identification using LLM analysis (open conjectures, unexplored graph families, missing proofs)
+- Interactive gap selection with human-in-the-loop approval
 - Self-correcting paper generation with grounding checks
 - Human-in-the-loop checkpoints at key stages
 - Comprehensive evaluation metrics (NLI, BERTScore, citation verification)
@@ -14,7 +15,7 @@ An AI-powered system that generates academic research papers in graph theory usi
 ## Tech Stack
 
 - **Orchestration**: LangGraph
-- **LLM**: Google Gemini 3.1 Flash Lite
+- **LLM**: Google Gemini (configurable via `GEMINI_MODEL`)
 - **Vector Store**: ChromaDB
 - **Embeddings**: Google text-embedding-004
 - **Paper Sources**: ArXiv, Semantic Scholar
@@ -41,7 +42,20 @@ GOOGLE_API_KEY=your_gemini_api_key
 LANGCHAIN_API_KEY=your_langsmith_api_key
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_PROJECT=graph-theory-paper-gen
+
+# Optional overrides (these have sensible defaults)
+GEMINI_MODEL=gemini-1.5-flash      # LLM for planning, gap finding, writing
+EMBEDDING_MODEL=models/gemini-embedding-001
+MAX_GAPS=5                         # Max research gaps to identify
 ```
+
+Common model options for `GEMINI_MODEL`:
+
+| Model | Speed | Quality | Use case |
+|---|---|---|---|
+| `gemini-2.0-flash-lite` | Fastest | Good | Rapid testing |
+| `gemini-1.5-flash` | Fast | Better | Default |
+| `gemini-1.5-pro` | Slower | Best | Final runs |
 
 ## Usage
 
@@ -57,11 +71,12 @@ python -m src.main
 
 ```
 src/
-├── agents/       # LangGraph agent nodes
-├── retrieval/    # RAG pipeline & paper fetching
-├── eval/         # Evaluation metrics
+├── agents/       # LangGraph agent nodes and graph definition
+├── retrieval/    # RAG pipeline & paper fetching (Phase 2)
+├── gap_finding/  # Research gap analysis via Gemini (Phase 3)
+├── eval/         # Evaluation metrics (Phase 5)
 ├── ui/           # Streamlit interface
-└── utils/        # Shared utilities
+└── utils/        # Shared utilities (state schema, config)
 
 tests/            # Unit & integration tests
 ```
