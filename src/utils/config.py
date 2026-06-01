@@ -70,5 +70,4 @@ class Config:
             raise ValueError("LANGCHAIN_API_KEY is not set in environment")
 
 
-# Validate configuration on import
-Config.validate()
+# Call Config.validate() explicitly in main() — not at import time (REF-2).

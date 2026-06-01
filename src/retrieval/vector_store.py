@@ -6,7 +6,7 @@ which doesn't serve all embedding models; google.genai 2.x uses the correct endp
 
 import time
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import chromadb
 import google.genai as genai
@@ -43,6 +43,7 @@ def _paper_from_chroma_row(
     authors = [a.strip() for a in authors_str.split(",")] if authors_str else []
     year_str = meta.get("year", "")
     year = int(year_str) if year_str and year_str.isdigit() else None
+    # FIX-5: cosine distance ∈ [0, 2] → clamp to [0, 1] so score is never negative.
     return {
         "title": meta.get("title", ""),
         "abstract": document,
@@ -51,7 +52,7 @@ def _paper_from_chroma_row(
         "pdf_url": meta.get("pdf_url") or None,
         "source": meta.get("source", "unknown"),
         "year": year,
-        "relevance_score": round(1.0 - distance, 4),
+        "relevance_score": round(max(0.0, 1.0 - distance), 4),
     }
 
 
@@ -63,8 +64,15 @@ class VectorStore:
         persist_dir: str = Config.CHROMA_DB_PATH,
         collection_name: str = _DEFAULT_COLLECTION,
         clear: bool = False,
+        chroma_client=None,
+        genai_client=None,
     ):
-        self.chroma = chromadb.PersistentClient(path=persist_dir)
+        # REF-4: accept injected clients so tests can construct without real I/O.
+        self.chroma = (
+            chroma_client
+            if chroma_client is not None
+            else chromadb.PersistentClient(path=persist_dir)
+        )
         if clear:
             try:
                 self.chroma.delete_collection(collection_name)
@@ -75,7 +83,11 @@ class VectorStore:
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
-        self._genai = genai.Client(api_key=Config.GOOGLE_API_KEY)
+        self._genai = (
+            genai_client
+            if genai_client is not None
+            else genai.Client(api_key=Config.GOOGLE_API_KEY)
+        )
         self.embedding_model = Config.EMBEDDING_MODEL
 
     def _embed_texts(self, texts: List[str]) -> List[List[float]]:
@@ -142,13 +154,18 @@ class VectorStore:
         except Exception as exc:
             logger.error("Failed to delete papers from ChromaDB: %s", exc)
 
-    def similarity_search(self, query: str, k: int = Config.TOP_K_PAPERS) -> List[Paper]:
-        """Return the top-k most relevant papers for a query string."""
+    def similarity_search(self, query: str, k: Optional[int] = None) -> List[Paper]:
+        """Return the top-k most relevant papers for a query string.
+
+        FIX-6: k defaults to None and resolves from Config at call time, so
+        runtime changes to Config.TOP_K_PAPERS are respected.
+        """
+        effective_k = k if k is not None else Config.TOP_K_PAPERS
         count = self.collection.count()
         if count == 0:
             return []
 
-        n_results = min(k, count)
+        n_results = min(effective_k, count)
         query_vector = self._embed_query(query)
 
         results = self.collection.query(
@@ -168,7 +185,7 @@ class VectorStore:
         return papers
 
     def get_relevant_papers(
-        self, sub_queries: List[str], k_per_query: int = Config.TOP_K_PAPERS
+        self, sub_queries: List[str], k_per_query: Optional[int] = None
     ) -> List[Paper]:
         """
         Retrieve and deduplicate top-k papers across all sub-queries.
@@ -185,7 +202,10 @@ class VectorStore:
                     all_papers.append(paper)
 
         all_papers.sort(key=lambda p: p.get("relevance_score") or 0.0, reverse=True)
-        filtered = [p for p in all_papers if (p.get("relevance_score") or 0.0) >= Config.MIN_RELEVANCE_SCORE]
+        filtered = [
+            p for p in all_papers
+            if (p.get("relevance_score") or 0.0) >= Config.MIN_RELEVANCE_SCORE
+        ]
         logger.info(
             "Relevance filter (>= %.2f): %d/%d papers kept",
             Config.MIN_RELEVANCE_SCORE,

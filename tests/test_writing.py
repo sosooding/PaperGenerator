@@ -225,7 +225,9 @@ class TestGenerateSection:
 
     def test_extracts_inline_citations(self):
         llm = _make_llm("See [S1] and [S2].")
-        section = generate_section("introduction", "Q", _make_gap(), {}, "outline", [], llm)
+        # FIX-4: source_map must contain S1 and S2 or they are dropped as hallucinations.
+        sm = {"S1": _make_paper("P1"), "S2": _make_paper("P2")}
+        section = generate_section("introduction", "Q", _make_gap(), sm, "outline", [], llm)
         assert section["citations"] == ["S1", "S2"]
 
     def test_no_citations_returns_empty_list(self):

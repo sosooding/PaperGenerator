@@ -15,13 +15,16 @@ from langgraph.types import interrupt
 from src.utils.state import AgentState, ResearchGap
 from src.utils.config import Config
 from src.utils.llm import get_llm
+from src.utils.llm_parse import normalise_content, strip_fences
 from src.retrieval.paper_fetcher import fetch_papers_for_queries
 from src.retrieval.vector_store import VectorStore
 from src.gap_finding.gap_analyzer import find_research_gaps
+from src.agents.interrupts import decode_draft_edits
 from src.writing.writer import (
     build_source_map,
     generate_outline,
     generate_section,
+    _extract_citations,
     SECTIONS,
     SECTION_RAG_SUFFIXES,
 )
@@ -45,7 +48,7 @@ def planner_node(state: AgentState) -> AgentState:
     Falls back to the raw question on parse failure.
     """
     research_question = state.get("research_question", "")
-    print(f"[PLANNER] Decomposing: {research_question!r}")
+    logger.info("[PLANNER] Decomposing: %r", research_question)
 
     llm = get_llm(temperature=0)
 
@@ -63,24 +66,7 @@ def planner_node(state: AgentState) -> AgentState:
 
     try:
         response = llm.invoke(prompt)
-        # langchain-google-genai may return content as a list of parts or a plain string
-        raw = response.content
-        if isinstance(raw, list):
-            content = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in raw
-            )
-        else:
-            content = str(raw)
-        content = content.strip()
-
-        # Strip accidental markdown code fences
-        if content.startswith("```"):
-            lines = content.splitlines()
-            content = "\n".join(
-                line for line in lines if not line.strip().startswith("```")
-            ).strip()
-
+        content = strip_fences(normalise_content(response.content))
         parsed = json.loads(content)
         if isinstance(parsed, list) and parsed:
             sub_queries = [str(q) for q in parsed]
@@ -91,7 +77,7 @@ def planner_node(state: AgentState) -> AgentState:
         logger.warning(msg)
         errors.append(msg)
 
-    print(f"[PLANNER] Generated {len(sub_queries)} sub-queries")
+    logger.info("[PLANNER] Generated %d sub-queries", len(sub_queries))
     return {**state, "sub_queries": sub_queries, "current_phase": "planning", "errors": errors}
 
 
@@ -109,11 +95,10 @@ def retriever_node(state: AgentState) -> AgentState:
         errors.append(msg)
         return {**state, "current_phase": "retrieval", "errors": errors}
 
-    print(f"[RETRIEVER] Fetching papers for {len(sub_queries)} sub-queries")
+    logger.info("[RETRIEVER] Fetching papers for %d sub-queries", len(sub_queries))
 
-    # 1. Fetch raw papers from both sources
     papers = fetch_papers_for_queries(sub_queries)
-    print(f"[RETRIEVER] Fetched {len(papers)} unique papers")
+    logger.info("[RETRIEVER] Fetched %d unique papers", len(papers))
 
     if not papers:
         msg = "No papers retrieved from ArXiv or Semantic Scholar"
@@ -127,7 +112,6 @@ def retriever_node(state: AgentState) -> AgentState:
             "errors": errors,
         }
 
-    # 2. Embed and store in ChromaDB (collection keyed by question hash for caching)
     collection_name = _question_collection_name(state.get("research_question", ""))
     vector_store = VectorStore(collection_name=collection_name)
     vector_store.embed_and_store(papers)
@@ -144,11 +128,12 @@ def retriever_node(state: AgentState) -> AgentState:
             "errors": errors,
         }
 
-    # 3. Similarity search to rank, deduplicate, and threshold-filter
     relevant_papers = vector_store.get_relevant_papers(sub_queries)
-    print(f"[RETRIEVER] Selected {len(relevant_papers)} relevant papers:")
-    for paper in relevant_papers:
-        print(f"  [{paper.get('year', '?')}] {paper['title']}")
+    logger.info(
+        "[RETRIEVER] Selected %d relevant papers: %s",
+        len(relevant_papers),
+        ", ".join(f"[{p.get('year', '?')}] {p['title'][:40]}" for p in relevant_papers),
+    )
 
     return {
         **state,
@@ -212,9 +197,9 @@ def paper_approver_node(state: AgentState) -> AgentState:
         collection_name = _question_collection_name(state.get("research_question", ""))
         vector_store = VectorStore(collection_name=collection_name)
         vector_store.delete_papers(removed_papers)
-        print(f"[PAPER_APPROVER] Removed {len(removed_papers)} paper(s) from state and ChromaDB")
+        logger.info("[PAPER_APPROVER] Removed %d paper(s) from state and ChromaDB", len(removed_papers))
 
-    print(f"[PAPER_APPROVER] Keeping {len(kept_papers)} paper(s)")
+    logger.info("[PAPER_APPROVER] Keeping %d paper(s)", len(kept_papers))
 
     human_decisions = list(state.get("human_decisions", []))
     human_decisions.append({
@@ -245,7 +230,7 @@ def gap_finder_node(state: AgentState) -> AgentState:
     research_question = state.get("research_question", "")
     errors = list(state.get("errors", []))
 
-    print(f"[GAP_FINDER] Analyzing {len(papers)} papers for research gaps")
+    logger.info("[GAP_FINDER] Analyzing %d papers for research gaps", len(papers))
 
     if not papers:
         msg = "gap_finder: no retrieved papers; skipping gap analysis"
@@ -263,7 +248,7 @@ def gap_finder_node(state: AgentState) -> AgentState:
         return {**state, "gaps": [], "selected_gap": None,
                 "current_phase": "gap_finding", "errors": errors}
 
-    print(f"[GAP_FINDER] Found {len(gaps)} gaps")
+    logger.info("[GAP_FINDER] Found %d gaps", len(gaps))
     return {**state, "gaps": gaps, "selected_gap": None,
             "current_phase": "gap_finding", "errors": errors}
 
@@ -280,7 +265,7 @@ def gap_selector_node(state: AgentState) -> AgentState:
     sorted_gaps = sorted(gaps, key=lambda g: g["novelty_score"], reverse=True)
 
     if not sorted_gaps:
-        print("[GAP_SELECTOR] No gaps available; proceeding with no selected gap")
+        logger.info("[GAP_SELECTOR] No gaps available; proceeding with no selected gap")
         return {**state, "selected_gap": None, "current_phase": "gap_selection"}
 
     gap_list = [
@@ -302,7 +287,6 @@ def gap_selector_node(state: AgentState) -> AgentState:
         "gaps": gap_list,
     })
 
-    # Resolve selection: accept 1-based integer or exact gap_title string
     selected_gap: Optional[ResearchGap] = None
     try:
         idx = int(user_choice) - 1
@@ -319,17 +303,21 @@ def gap_selector_node(state: AgentState) -> AgentState:
         logger.warning("gap_selector: unrecognised choice %r; defaulting to highest novelty", user_choice)
         selected_gap = sorted_gaps[0]
 
-    print(f"[GAP_SELECTOR] Selected: {selected_gap['gap_title']!r} "
-          f"(novelty={selected_gap['novelty_score']:.2f})")
+    logger.info(
+        "[GAP_SELECTOR] Selected: %r (novelty=%.2f)",
+        selected_gap["gap_title"],
+        selected_gap["novelty_score"],
+    )
 
     human_decisions = list(state.get("human_decisions", []))
+    # FIX-3: use None for not-applicable fields (schema: Optional[...]).
     human_decisions.append({
         "checkpoint_name": "gap_selection",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "approved_papers": [],
-        "removed_papers": [],
+        "approved_papers": None,
+        "removed_papers": None,
         "selected_gap": selected_gap,
-        "edited_sections": [],
+        "edited_sections": None,
         "notes": str(user_choice),
     })
 
@@ -354,8 +342,8 @@ def writer_node(state: AgentState) -> AgentState:
         errors.append(msg)
         return {**state, "current_phase": "writing", "errors": errors}
 
-    print(f"[WRITER] Gap: {selected_gap['gap_title']!r}")
-    print(f"[WRITER] Writing with {len(papers)} source papers")
+    logger.info("[WRITER] Gap: %r", selected_gap["gap_title"])
+    logger.info("[WRITER] Writing with %d source papers", len(papers))
 
     source_map = build_source_map(papers)
     llm = get_llm(temperature=0.7)
@@ -363,7 +351,7 @@ def writer_node(state: AgentState) -> AgentState:
     # Step 1: outline
     try:
         outline = generate_outline(research_question, selected_gap, source_map, llm)
-        print(f"[WRITER] Outline generated ({len(outline)} chars)")
+        logger.info("[WRITER] Outline generated (%d chars)", len(outline))
     except Exception as exc:
         msg = f"writer_node: outline generation failed ({exc})"
         logger.error(msg)
@@ -389,9 +377,11 @@ def writer_node(state: AgentState) -> AgentState:
                 llm=llm,
             )
             draft_sections.append(section)
-            print(
-                f"[WRITER] {section_name}: {len(section['content'].split())} words, "
-                f"{len(section['citations'])} citations"
+            logger.info(
+                "[WRITER] %s: %d words, %d citations",
+                section_name,
+                len(section["content"].split()),
+                len(section["citations"]),
             )
         except Exception as exc:
             msg = f"writer_node: section '{section_name}' failed ({exc})"
@@ -446,27 +436,27 @@ def draft_reviewer_node(state: AgentState) -> AgentState:
         "sections": section_list,
     })
 
-    edited_sections: dict = {}
     choice_str = str(user_choice).strip() if user_choice else ""
-    if choice_str:
-        try:
-            parsed = json.loads(choice_str)
-            if isinstance(parsed, dict):
-                edited_sections = {str(k): str(v) for k, v in parsed.items()}
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("draft_reviewer: could not parse user input as JSON; no edits applied")
+    edited_sections = decode_draft_edits(choice_str)
 
-    updated_sections = [
-        {**s, "content": edited_sections[s["section_name"]]}
-        if s["section_name"] in edited_sections
-        else s
-        for s in draft_sections
-    ]
+    # FIX-1: re-extract citations from the new content so they stay in sync.
+    updated_sections = []
+    for section in draft_sections:
+        name = section["section_name"]
+        if name in edited_sections:
+            new_content = edited_sections[name]
+            updated_sections.append({
+                **section,
+                "content": new_content,
+                "citations": _extract_citations(new_content),
+            })
+        else:
+            updated_sections.append(section)
 
     if edited_sections:
-        print(f"[DRAFT_REVIEWER] Edited sections: {list(edited_sections.keys())}")
+        logger.info("[DRAFT_REVIEWER] Edited sections: %s", list(edited_sections.keys()))
     else:
-        print("[DRAFT_REVIEWER] No edits; accepting all sections")
+        logger.info("[DRAFT_REVIEWER] No edits; accepting all sections")
 
     human_decisions = list(state.get("human_decisions", []))
     human_decisions.append({
@@ -498,7 +488,7 @@ def critic_node(state: AgentState) -> AgentState:
     - Score 0-10
     - Update state.critic_feedback
     """
-    print(f"[CRITIC] Sections: {len(state.get('draft_sections', []))}")
+    logger.info("[CRITIC] Sections: %d", len(state.get("draft_sections", [])))
     revision_count = state.get("revision_count", 0)
     return {**state, "current_phase": "critiquing", "revision_count": revision_count + 1}
 
@@ -514,7 +504,7 @@ def formatter_node(state: AgentState) -> AgentState:
     - Convert to PDF via Pandoc
     - Update state.citation_report
     """
-    print(f"[FORMATTER] Finalizing paper...")
+    logger.info("[FORMATTER] Finalizing paper...")
     return {**state, "current_phase": "formatting"}
 
 
@@ -529,7 +519,6 @@ def should_revise(state: AgentState) -> Literal["writer", "formatter"]:
     """
     critic_feedback = state.get("critic_feedback", [])
     if not critic_feedback:
-        # No feedback yet, proceed to formatter
         return "formatter"
 
     latest_feedback = critic_feedback[-1]
@@ -537,17 +526,15 @@ def should_revise(state: AgentState) -> Literal["writer", "formatter"]:
     flagged_count = len(latest_feedback.get("flagged_sentences", []))
     revision_count = state.get("revision_count", 0)
 
-    # Check if we've exceeded max revisions
     if revision_count >= Config.MAX_REVISION_CYCLES:
-        print(f"[ROUTER] Max revisions reached ({revision_count}), proceeding to formatter")
+        logger.info("[ROUTER] Max revisions reached (%d), proceeding to formatter", revision_count)
         return "formatter"
 
-    # Check if quality is acceptable
     if score >= Config.MIN_CRITIC_SCORE and flagged_count < Config.MAX_FLAGGED_SENTENCES:
-        print(f"[ROUTER] Quality acceptable (score={score:.1f}), proceeding to formatter")
+        logger.info("[ROUTER] Quality acceptable (score=%.1f), proceeding to formatter", score)
         return "formatter"
 
-    print(f"[ROUTER] Needs revision (score={score:.1f}, flagged={flagged_count})")
+    logger.info("[ROUTER] Needs revision (score=%.1f, flagged=%d)", score, flagged_count)
     return "writer"
 
 
@@ -576,10 +563,8 @@ def create_graph(checkpointer=None) -> StateGraph:
            -> writer -> draft_reviewer* -> critic -> [revise loop or formatter] -> END
     (* pauses for user input via LangGraph interrupt)
     """
-    # Create graph
     workflow = StateGraph(AgentState)
 
-    # Add nodes
     workflow.add_node("planner", planner_node)
     workflow.add_node("retriever", retriever_node)
     workflow.add_node("paper_approver", paper_approver_node)
@@ -590,7 +575,6 @@ def create_graph(checkpointer=None) -> StateGraph:
     workflow.add_node("critic", critic_node)
     workflow.add_node("formatter", formatter_node)
 
-    # Add edges
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "retriever")
     workflow.add_edge("retriever", "paper_approver")
@@ -600,19 +584,17 @@ def create_graph(checkpointer=None) -> StateGraph:
     workflow.add_edge("writer", "draft_reviewer")
     workflow.add_edge("draft_reviewer", "critic")
 
-    # Conditional edge: critic -> writer (revise) or formatter (accept)
     workflow.add_conditional_edges(
         "critic",
         should_revise,
         {
-            "writer": "writer",  # Needs revision
-            "formatter": "formatter",  # Quality acceptable
+            "writer": "writer",
+            "formatter": "formatter",
         }
     )
 
     workflow.add_edge("formatter", END)
 
-    # Compile with checkpointer
     return workflow.compile(checkpointer=checkpointer)
 
 

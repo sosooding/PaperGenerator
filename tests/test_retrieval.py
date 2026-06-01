@@ -299,18 +299,14 @@ def _make_embedding_response(vectors: List[List[float]]):
 
 class TestVectorStore:
     def _make_store(self, clear: bool = False):
-        with patch("src.retrieval.vector_store.chromadb.PersistentClient") as mock_chroma_cls, \
-             patch("src.retrieval.vector_store.genai.Client") as mock_genai_cls:
-
-            mock_collection = MagicMock()
-            mock_collection.count.return_value = 0
-            mock_chroma_cls.return_value.get_or_create_collection.return_value = mock_collection
-
-            mock_genai = MagicMock()
-            mock_genai_cls.return_value = mock_genai
-
-            store = VectorStore(persist_dir="./test_chroma", clear=clear)
-            return store, mock_collection, mock_genai, mock_chroma_cls.return_value
+        # REF-4: use constructor injection instead of patching module-level classes.
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+        mock_chroma = MagicMock()
+        mock_chroma.get_or_create_collection.return_value = mock_collection
+        mock_genai = MagicMock()
+        store = VectorStore(chroma_client=mock_chroma, genai_client=mock_genai, clear=clear)
+        return store, mock_collection, mock_genai, mock_chroma
 
     def test_embed_and_store_calls_upsert(self):
         store, mock_col, mock_genai, _ = self._make_store()

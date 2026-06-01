@@ -11,9 +11,13 @@ from typing import List
 
 from src.utils.config import Config
 from src.utils.llm import get_llm
+from src.utils.llm_parse import normalise_content, strip_fences
 from src.utils.state import Paper, ResearchGap
 
 logger = logging.getLogger(__name__)
+
+# REF-1: backward-compat alias so existing test imports still resolve.
+_strip_markdown_fences = strip_fences
 
 
 def _evidence_id(paper: Paper) -> str:
@@ -36,16 +40,6 @@ def _build_abstract_corpus(papers: List[Paper]) -> str:
         lines.append(f"Abstract: {(paper.get('abstract') or '').strip()}")
     lines.append("\n=== END CORPUS ===")
     return "\n".join(lines)
-
-
-def _strip_markdown_fences(content: str) -> str:
-    """Remove ```json or ``` fences from LLM output (mirrors planner_node logic)."""
-    if content.startswith("```"):
-        lines = content.splitlines()
-        content = "\n".join(
-            line for line in lines if not line.strip().startswith("```")
-        ).strip()
-    return content
 
 
 def _clamp_novelty(score) -> float:
@@ -93,7 +87,6 @@ def find_research_gaps(papers: List[Paper], research_question: str) -> List[Rese
     corpus = _build_abstract_corpus(papers)
     max_gaps = Config.MAX_GAPS
 
-    # Build evidence-id instructions so Gemini knows what to put in supporting_evidence
     evidence_note = (
         "For each gap, list the evidence IDs of papers that support it. "
         "Use the paper's DOI when available (shown as 'DOI: <value>' in the corpus). "
@@ -131,17 +124,7 @@ def find_research_gaps(papers: List[Paper], research_question: str) -> List[Rese
                 Config.LLM_PROVIDER, Config.LLM_MODEL, len(papers))
     response = llm.invoke(prompt)
 
-    # Normalise content — langchain-google-genai may return list-of-parts
-    raw = response.content
-    if isinstance(raw, list):
-        content = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in raw
-        )
-    else:
-        content = str(raw)
-
-    content = _strip_markdown_fences(content.strip())
+    content = strip_fences(normalise_content(response.content))
     gaps = _parse_gaps(content)
     logger.info("Identified %d research gaps", len(gaps))
     return gaps

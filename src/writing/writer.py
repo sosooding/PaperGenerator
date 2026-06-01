@@ -8,9 +8,13 @@ from typing import Dict, List
 
 from src.utils.config import Config
 from src.utils.llm import get_llm
+from src.utils.llm_parse import normalise_content, strip_fences
 from src.utils.state import DraftSection, Paper, ResearchGap
 
 logger = logging.getLogger(__name__)
+
+# REF-1: backward-compat alias so existing test imports still resolve.
+_strip_markdown_fences = strip_fences
 
 SECTIONS: List[str] = [
     "abstract",
@@ -103,24 +107,6 @@ def _extract_citations(content: str) -> List[str]:
     return result
 
 
-def _normalise_llm_content(raw) -> str:
-    if isinstance(raw, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in raw
-        ).strip()
-    return str(raw).strip()
-
-
-def _strip_markdown_fences(content: str) -> str:
-    if content.startswith("```"):
-        lines = content.splitlines()
-        content = "\n".join(
-            line for line in lines if not line.strip().startswith("```")
-        ).strip()
-    return content
-
-
 def generate_outline(
     research_question: str,
     gap: ResearchGap,
@@ -145,7 +131,7 @@ def generate_outline(
     )
     logger.info("Generating outline for gap %r", gap["gap_title"])
     response = llm.invoke(prompt)
-    outline = _strip_markdown_fences(_normalise_llm_content(response.content))
+    outline = strip_fences(normalise_content(response.content))
     logger.info("Outline generated (%d chars)", len(outline))
     return outline
 
@@ -184,8 +170,19 @@ def generate_section(
     )
     logger.info("Generating section: %s", section_name)
     response = llm.invoke(prompt)
-    content = _strip_markdown_fences(_normalise_llm_content(response.content))
-    citations = _extract_citations(content)
+    content = strip_fences(normalise_content(response.content))
+
+    # FIX-4: drop any [Sx] tags the LLM invented that aren't in source_map.
+    raw_citations = _extract_citations(content)
+    citations = [c for c in raw_citations if c in source_map]
+    if len(citations) < len(raw_citations):
+        dropped = set(raw_citations) - set(citations)
+        logger.warning(
+            "generate_section(%s): dropped hallucinated citations: %s",
+            section_name,
+            sorted(dropped),
+        )
+
     return {
         "section_name": section_name,
         "content": content,

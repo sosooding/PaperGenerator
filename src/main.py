@@ -8,6 +8,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from src.agents.graph import create_graph, get_initial_state
+from src.agents.interrupts import encode_draft_edits
 from src.utils.config import Config
 
 
@@ -33,7 +34,7 @@ def _handle_interrupt(interrupt_value: dict) -> str:
         print()
         return input("Your choice (number): ").strip()
 
-    # Draft review interrupt
+    # Draft review interrupt (REF-3: uses encode_draft_edits for the resume value)
     if "sections" in interrupt_value:
         outline = interrupt_value.get("outline", "")
         sections = interrupt_value["sections"]
@@ -75,14 +76,16 @@ def _handle_interrupt(interrupt_value: dict) -> str:
             edits[name] = "\n".join(lines)
             print(f"  '{name}' updated.")
 
-        return json.dumps(edits)
+        return encode_draft_edits(edits)
 
     # Generic fallback
     return input("Your choice: ").strip()
 
 
 def main():
-    """Run the paper generation workflow."""
+    # REF-2: validate API keys explicitly here rather than at import time.
+    Config.validate()
+
     research_question = (
         "How can I efficiently query connected components in large temporal graphs "
         "with scalable and maintainable indices?"

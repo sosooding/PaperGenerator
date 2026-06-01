@@ -111,7 +111,6 @@ def test_edit_unknown_section_ignored():
     state = _base_state()
     edits = json.dumps({"nonexistent_section": "Some text."})
     result = _invoke_reviewer(state, edits)
-    # Existing sections unchanged
     assert result["draft_sections"][0]["content"] == "Original abstract text."
     assert result["draft_sections"][1]["content"] == "Original introduction text."
 
@@ -135,15 +134,34 @@ def test_non_dict_json_no_edits():
 
 
 # ---------------------------------------------------------------------------
-# Citations preserved after edit
+# FIX-1: citations are re-extracted from the new content, not carried over.
 # ---------------------------------------------------------------------------
 
-def test_citations_preserved_after_edit():
+def test_citations_recomputed_when_user_adds_one():
+    """User edits abstract to cite [S2]; citations must include S2."""
     state = _base_state()
-    edits = json.dumps({"abstract": "Completely new abstract."})
+    edits = json.dumps({"abstract": "Rewritten text citing [S1] and now [S2]."})
     result = _invoke_reviewer(state, edits)
     abstract = next(s for s in result["draft_sections"] if s["section_name"] == "abstract")
-    assert abstract["citations"] == ["S1"]
+    assert abstract["citations"] == ["S1", "S2"]
+
+
+def test_citations_recomputed_when_user_removes_all():
+    """User strips all citations; citations list must become empty."""
+    state = _base_state()
+    edits = json.dumps({"abstract": "Clean prose with no citations at all."})
+    result = _invoke_reviewer(state, edits)
+    abstract = next(s for s in result["draft_sections"] if s["section_name"] == "abstract")
+    assert abstract["citations"] == []
+
+
+def test_unedited_section_citations_unchanged():
+    """Sections the user did not edit keep their original citations."""
+    state = _base_state()
+    edits = json.dumps({"abstract": "New abstract [S3]."})
+    result = _invoke_reviewer(state, edits)
+    intro = next(s for s in result["draft_sections"] if s["section_name"] == "introduction")
+    assert intro["citations"] == ["S2"]
 
 
 # ---------------------------------------------------------------------------
