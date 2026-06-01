@@ -18,6 +18,13 @@ from src.utils.llm import get_llm
 from src.retrieval.paper_fetcher import fetch_papers_for_queries
 from src.retrieval.vector_store import VectorStore
 from src.gap_finding.gap_analyzer import find_research_gaps
+from src.writing.writer import (
+    build_source_map,
+    generate_outline,
+    generate_section,
+    SECTIONS,
+    SECTION_RAG_SUFFIXES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -332,19 +339,78 @@ def gap_selector_node(state: AgentState) -> AgentState:
 
 def writer_node(state: AgentState) -> AgentState:
     """
-    Generate paper sections with grounded citations.
-
-    Phase 4 will implement:
-    - For each section (abstract, intro, related_work, gap_analysis, proposed_approach, conclusion)
-    - Retrieve relevant chunks from ChromaDB
-    - Generate content with [SOURCE_ID] tags
-    - Enforce grounding requirement
-    - Update state.draft_sections
+    Phase 4b: generate paper outline then all 6 sections with grounded [Sx] citations.
+    Step 1 — outline (1 LLM call): section headers + 2-3 bullets each.
+    Step 2 — sections (6 LLM calls): per-section hybrid RAG context + source_map.
     """
-    selected_gap = state.get('selected_gap')
-    gap_title = selected_gap.get('gap_title', 'N/A') if selected_gap else 'N/A'
-    print(f"[WRITER] Selected gap: {gap_title}")
-    return {**state, "current_phase": "writing"}
+    selected_gap = state.get("selected_gap")
+    research_question = state.get("research_question", "")
+    papers = state.get("retrieved_papers", [])
+    errors = list(state.get("errors", []))
+
+    if not selected_gap:
+        msg = "writer_node: no selected_gap in state; skipping writing"
+        logger.warning(msg)
+        errors.append(msg)
+        return {**state, "current_phase": "writing", "errors": errors}
+
+    print(f"[WRITER] Gap: {selected_gap['gap_title']!r}")
+    print(f"[WRITER] Writing with {len(papers)} source papers")
+
+    source_map = build_source_map(papers)
+    llm = get_llm(temperature=0.7)
+
+    # Step 1: outline
+    try:
+        outline = generate_outline(research_question, selected_gap, source_map, llm)
+        print(f"[WRITER] Outline generated ({len(outline)} chars)")
+    except Exception as exc:
+        msg = f"writer_node: outline generation failed ({exc})"
+        logger.error(msg)
+        errors.append(msg)
+        outline = ""
+
+    # Step 2: one LLM call per section with hybrid RAG context
+    collection_name = _question_collection_name(research_question)
+    vector_store = VectorStore(collection_name=collection_name)
+    draft_sections = []
+
+    for section_name in SECTIONS:
+        try:
+            rag_query = f"{selected_gap['description']} — {SECTION_RAG_SUFFIXES[section_name]}"
+            rag_papers = vector_store.similarity_search(rag_query, k=5)
+            section = generate_section(
+                section_name=section_name,
+                research_question=research_question,
+                gap=selected_gap,
+                source_map=source_map,
+                outline=outline,
+                rag_papers=rag_papers,
+                llm=llm,
+            )
+            draft_sections.append(section)
+            print(
+                f"[WRITER] {section_name}: {len(section['content'].split())} words, "
+                f"{len(section['citations'])} citations"
+            )
+        except Exception as exc:
+            msg = f"writer_node: section '{section_name}' failed ({exc})"
+            logger.error(msg)
+            errors.append(msg)
+            draft_sections.append({
+                "section_name": section_name,
+                "content": f"[Generation failed: {exc}]",
+                "citations": [],
+            })
+
+    return {
+        **state,
+        "outline": outline,
+        "draft_sections": draft_sections,
+        "citation_report": {sid: paper for sid, paper in source_map.items()},
+        "current_phase": "writing",
+        "errors": errors,
+    }
 
 
 def critic_node(state: AgentState) -> AgentState:

@@ -133,7 +133,7 @@ def test_gap_finder_node():
 
 
 def test_writer_node():
-    """Test writer node updates state correctly."""
+    """Test writer node generates outline and all 6 draft sections."""
     initial_state = get_initial_state("Test question")
     initial_state["selected_gap"] = {
         "gap_title": "Test gap",
@@ -141,9 +141,30 @@ def test_writer_node():
         "supporting_evidence": [],
         "novelty_score": 0.8,
     }
+    initial_state["retrieved_papers"] = [make_paper("P1")]
+
+    def _mock_section(section_name, **kwargs):
+        return {"section_name": section_name, "content": "Content [S1].", "citations": ["S1"]}
+
+    with patch("src.agents.graph.generate_outline", return_value="## Abstract\n- Point 1"), \
+         patch("src.agents.graph.generate_section", side_effect=_mock_section), \
+         patch("src.agents.graph.VectorStore") as mock_vs_cls:
+        mock_vs_cls.return_value.similarity_search.return_value = []
+        result = writer_node(initial_state)
+
+    assert result["current_phase"] == "writing"
+    assert result["outline"] == "## Abstract\n- Point 1"
+    assert len(result["draft_sections"]) == 6
+    assert result["citation_report"]["S1"]["title"] == "P1"
+
+
+def test_writer_node_no_gap():
+    """Writer node without a selected gap records an error and skips writing."""
+    initial_state = get_initial_state("Test question")
     result = writer_node(initial_state)
 
     assert result["current_phase"] == "writing"
+    assert any("no selected_gap" in e for e in result["errors"])
 
 
 def test_critic_node():
@@ -254,33 +275,36 @@ def test_create_graph_with_checkpointer():
 
 def test_graph_invoke_end_to_end():
     """Test full graph execution end-to-end."""
-    # Create temporary database
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         tmp_path = tmp.name
+
+    def _mock_section(section_name, **kwargs):
+        return {"section_name": section_name, "content": "Content.", "citations": []}
 
     try:
         with SqliteSaver.from_conn_string(tmp_path) as checkpointer:
             graph = create_graph(checkpointer=checkpointer)
             initial_state = get_initial_state("Test research question")
-
             config = {"configurable": {"thread_id": "test-thread"}}
 
-            # Execute graph — may pause at paper_approver or gap_selector
-            result = graph.invoke(initial_state, config)
+            with patch("src.agents.graph.generate_outline", return_value="## Outline"), \
+                 patch("src.agents.graph.generate_section", side_effect=_mock_section):
 
-            # Resume paper_approver interrupt (keep all papers)
-            if result.get("current_phase") != "formatting":
-                result = graph.invoke(Command(resume=""), config)
+                # Execute graph — may pause at paper_approver or gap_selector
+                result = graph.invoke(initial_state, config)
 
-            # Resume gap_selector interrupt (select first gap)
-            if result.get("current_phase") != "formatting":
-                result = graph.invoke(Command(resume="1"), config)
+                # Resume paper_approver interrupt (keep all papers)
+                if result.get("current_phase") != "formatting":
+                    result = graph.invoke(Command(resume=""), config)
+
+                # Resume gap_selector interrupt (select first gap)
+                if result.get("current_phase") != "formatting":
+                    result = graph.invoke(Command(resume="1"), config)
 
             assert result is not None
             assert result["research_question"] == "Test research question"
             assert result["current_phase"] == "formatting"
 
     finally:
-        # Cleanup
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
