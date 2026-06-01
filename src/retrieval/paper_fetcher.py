@@ -40,19 +40,29 @@ def _author_name(author) -> Optional[str]:
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
-def fetch_arxiv_papers(query: str, max_results: int = 20) -> List[Paper]:
-    """Fetch papers from ArXiv filtered to graph theory categories."""
-    category_filter = " OR ".join(f"cat:{c}" for c in Config.ARXIV_CATEGORY_FILTERS)
-    full_query = f"{query} AND ({category_filter})"
+def fetch_arxiv_papers(query: str, max_results: int = 15) -> List[Paper]:
+    """Fetch papers from ArXiv in the configured categories.
 
+    Category filtering is applied two ways:
+    - In the query string (narrows what ArXiv returns)
+    - Post-fetch on result.categories (catches any leakage)
+    Sorted by relevance so the best keyword matches surface first.
+    """
+    allowed_cats = set(Config.ARXIV_CATEGORY_FILTERS)
+    category_filter = " OR ".join(f"cat:{c}" for c in Config.ARXIV_CATEGORY_FILTERS)
+    full_query = f"({query}) AND ({category_filter})"
+
+    # Overfetch to compensate for post-filter rejections; cap at ArXiv's max (300).
     search = arxiv.Search(
         query=full_query,
-        max_results=max_results,
-        sort_by=arxiv.SortCriterion.SubmittedDate,
+        max_results=min(max_results * 4, 300),
+        sort_by=arxiv.SortCriterion.Relevance,
     )
 
     papers: List[Paper] = []
     for result in _arxiv_client.results(search):
+        if not set(result.categories).intersection(allowed_cats):
+            continue
         papers.append({
             "title": result.title,
             "abstract": result.summary,
@@ -63,6 +73,8 @@ def fetch_arxiv_papers(query: str, max_results: int = 20) -> List[Paper]:
             "year": result.published.year if result.published else None,
             "relevance_score": None,
         })
+        if len(papers) >= max_results:
+            break
 
     logger.info("ArXiv returned %d papers for query: %r", len(papers), query)
     return papers
@@ -113,7 +125,7 @@ def fetch_semantic_scholar_papers(query: str, max_results: int = 20) -> List[Pap
 
 def fetch_papers_for_queries(
     sub_queries: List[str],
-    papers_per_query: int = 5,
+    papers_per_query: int = 15,
 ) -> List[Paper]:
     """
     Fetch and deduplicate papers from ArXiv and Semantic Scholar for all sub-queries.

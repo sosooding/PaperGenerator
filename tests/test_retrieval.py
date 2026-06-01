@@ -103,6 +103,7 @@ class TestFetchArxivPapers:
         result.pdf_url = "http://example.com/paper.pdf"
         result.published = MagicMock()
         result.published.year = 2024
+        result.categories = ["cs.DM"]
         return result
 
     @patch("src.retrieval.paper_fetcher._arxiv_client")

@@ -38,10 +38,11 @@ class Config:
     CHROMA_DB_PATH = "./chroma_data"
 
     # Retrieval Settings
-    TOP_K_PAPERS = 5
+    TOP_K_PAPERS = int(os.getenv("TOP_K_PAPERS", "20"))
     MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.5"))
-    CLEAR_DB_ON_RUN = os.getenv("CLEAR_DB_ON_RUN", "true").lower() == "true"
-    ARXIV_CATEGORY_FILTERS = ["cs.DM", "math.CO"]  # Discrete Math, Combinatorics
+    ARXIV_CATEGORY_FILTERS = [
+        c.strip() for c in os.getenv("ARXIV_CATEGORY_FILTERS", "cs.DM,math.CO").split(",")
+    ]
     SEMANTIC_SCHOLAR_FIELD = "Mathematics"
 
     # Generation Settings

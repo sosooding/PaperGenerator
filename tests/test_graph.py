@@ -5,6 +5,7 @@ Unit tests for LangGraph workflow.
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
+from unittest.mock import patch, MagicMock
 import tempfile
 import os
 
@@ -13,6 +14,7 @@ from src.agents.graph import (
     get_initial_state,
     planner_node,
     retriever_node,
+    paper_approver_node,
     gap_finder_node,
     gap_selector_node,
     writer_node,
@@ -51,6 +53,63 @@ def test_retriever_node():
     result = retriever_node(initial_state)
 
     assert result["current_phase"] == "retrieval"
+
+
+def make_paper(title="Paper 1", doi="10.1/p1", year=2024, score=0.9):
+    return {
+        "title": title, "abstract": "Abstract.", "authors": ["Author"],
+        "doi": doi, "pdf_url": None, "source": "arxiv",
+        "year": year, "relevance_score": score,
+    }
+
+
+def test_paper_approver_node_no_papers():
+    """Skip interrupt and return unchanged when no papers are in state."""
+    state = get_initial_state("Test question")
+    result = paper_approver_node(state)
+
+    assert result["current_phase"] == "paper_approval"
+    assert result["retrieved_papers"] == []
+    assert result["human_decisions"] == []
+
+
+def test_paper_approver_node_keep_all():
+    """Empty input keeps all papers; no ChromaDB deletion."""
+    state = get_initial_state("Test question")
+    state["retrieved_papers"] = [make_paper("P1", "10.1/p1"), make_paper("P2", "10.1/p2")]
+
+    with patch("src.agents.graph.interrupt", return_value=""):
+        with patch("src.agents.graph.VectorStore") as mock_vs_cls:
+            result = paper_approver_node(state)
+
+    assert result["current_phase"] == "paper_approval"
+    assert len(result["retrieved_papers"]) == 2
+    assert len(result["human_decisions"]) == 1
+    decision = result["human_decisions"][0]
+    assert decision["checkpoint_name"] == "paper_approval"
+    assert decision["removed_papers"] == []
+    mock_vs_cls.assert_not_called()
+
+
+def test_paper_approver_node_remove_papers():
+    """Comma-separated indices remove the correct papers from state and ChromaDB."""
+    state = get_initial_state("Test question")
+    state["retrieved_papers"] = [
+        make_paper("P1", "10.1/p1"),
+        make_paper("P2", "10.1/p2"),
+        make_paper("P3", "10.1/p3"),
+    ]
+
+    mock_vs = MagicMock()
+    with patch("src.agents.graph.interrupt", return_value="1, 3"):
+        with patch("src.agents.graph.VectorStore", return_value=mock_vs):
+            result = paper_approver_node(state)
+
+    assert len(result["retrieved_papers"]) == 1
+    assert result["retrieved_papers"][0]["title"] == "P2"
+    decision = result["human_decisions"][0]
+    assert len(decision["removed_papers"]) == 2
+    mock_vs.delete_papers.assert_called_once()
 
 
 def test_gap_finder_node():
@@ -206,17 +265,20 @@ def test_graph_invoke_end_to_end():
 
             config = {"configurable": {"thread_id": "test-thread"}}
 
-            # Execute graph — may pause at gap_selector if gaps are found
+            # Execute graph — may pause at paper_approver or gap_selector
             result = graph.invoke(initial_state, config)
 
-            # If the graph paused for interactive gap selection, resume with "1" (first gap)
+            # Resume paper_approver interrupt (keep all papers)
+            if result.get("current_phase") != "formatting":
+                result = graph.invoke(Command(resume=""), config)
+
+            # Resume gap_selector interrupt (select first gap)
             if result.get("current_phase") != "formatting":
                 result = graph.invoke(Command(resume="1"), config)
 
-            # Verify result
             assert result is not None
             assert result["research_question"] == "Test research question"
-            assert result["current_phase"] == "formatting"  # Should reach the end
+            assert result["current_phase"] == "formatting"
 
     finally:
         # Cleanup

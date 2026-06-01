@@ -2,6 +2,7 @@
 Main LangGraph workflow for research paper generation.
 """
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -19,6 +20,12 @@ from src.retrieval.vector_store import VectorStore
 from src.gap_finding.gap_analyzer import find_research_gaps
 
 logger = logging.getLogger(__name__)
+
+
+def _question_collection_name(question: str) -> str:
+    """Derive a stable, isolated ChromaDB collection name from the research question."""
+    digest = hashlib.md5(question.strip().lower().encode()).hexdigest()[:16]
+    return f"papers_{digest}"
 
 
 # ============================================================================
@@ -113,8 +120,9 @@ def retriever_node(state: AgentState) -> AgentState:
             "errors": errors,
         }
 
-    # 2. Embed and store in ChromaDB (collection is cleared fresh each run by default)
-    vector_store = VectorStore()
+    # 2. Embed and store in ChromaDB (collection keyed by question hash for caching)
+    collection_name = _question_collection_name(state.get("research_question", ""))
+    vector_store = VectorStore(collection_name=collection_name)
     vector_store.embed_and_store(papers)
 
     if vector_store.collection.count() == 0:
@@ -140,6 +148,83 @@ def retriever_node(state: AgentState) -> AgentState:
         "retrieved_papers": relevant_papers,
         "embeddings_ready": True,
         "current_phase": "retrieval",
+        "errors": errors,
+    }
+
+
+def paper_approver_node(state: AgentState) -> AgentState:
+    """
+    Human-in-the-loop: display retrieved papers and allow the user to remove irrelevant ones.
+
+    The graph pauses here via LangGraph interrupt. Resume by calling:
+        graph.invoke(Command(resume=<choice>), config=...)
+    where <choice> is a comma-separated list of 1-based indices to remove
+    (e.g. "2,4") or an empty string to keep all papers.
+
+    Removed papers are deleted from both state.retrieved_papers and ChromaDB.
+    """
+    papers = state.get("retrieved_papers", [])
+    errors = list(state.get("errors", []))
+
+    if not papers:
+        return {**state, "current_phase": "paper_approval", "errors": errors}
+
+    paper_list = [
+        {
+            "index": i + 1,
+            "title": p["title"],
+            "year": p.get("year", "?"),
+            "relevance_score": round(p.get("relevance_score") or 0.0, 3),
+        }
+        for i, p in enumerate(papers)
+    ]
+
+    user_choice = interrupt({
+        "message": (
+            f"Retrieved {len(papers)} papers. "
+            "Enter comma-separated indices to remove, or press Enter to keep all:"
+        ),
+        "papers": paper_list,
+    })
+
+    removed_indices: set = set()
+    choice_str = str(user_choice).strip() if user_choice else ""
+    if choice_str:
+        for part in choice_str.split(","):
+            try:
+                idx = int(part.strip()) - 1
+                if 0 <= idx < len(papers):
+                    removed_indices.add(idx)
+            except ValueError:
+                pass
+
+    removed_papers = [papers[i] for i in sorted(removed_indices)]
+    kept_papers = [p for i, p in enumerate(papers) if i not in removed_indices]
+
+    if removed_papers:
+        collection_name = _question_collection_name(state.get("research_question", ""))
+        vector_store = VectorStore(collection_name=collection_name)
+        vector_store.delete_papers(removed_papers)
+        print(f"[PAPER_APPROVER] Removed {len(removed_papers)} paper(s) from state and ChromaDB")
+
+    print(f"[PAPER_APPROVER] Keeping {len(kept_papers)} paper(s)")
+
+    human_decisions = list(state.get("human_decisions", []))
+    human_decisions.append({
+        "checkpoint_name": "paper_approval",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "approved_papers": [p.get("doi") or p["title"] for p in kept_papers],
+        "removed_papers": [p.get("doi") or p["title"] for p in removed_papers],
+        "selected_gap": None,
+        "edited_sections": None,
+        "notes": choice_str,
+    })
+
+    return {
+        **state,
+        "retrieved_papers": kept_papers,
+        "human_decisions": human_decisions,
+        "current_phase": "paper_approval",
         "errors": errors,
     }
 
@@ -334,17 +419,20 @@ def create_graph(checkpointer=None) -> StateGraph:
     Build the LangGraph workflow.
 
     Nodes:
-    1. planner       -> Query decomposition
-    2. retriever     -> Paper retrieval
-    3. gap_finder    -> Research gap identification (calls Gemini)
-    4. gap_selector  -> Human-in-the-loop: user picks a gap (interrupt)
-    5. writer        -> Section-by-section writing
-    6. critic        -> Grounding & coherence check
-    7. formatter     -> Citation formatting & PDF generation
+    1. planner         -> Query decomposition
+    2. retriever       -> Paper retrieval & ChromaDB embedding
+    3. paper_approver  -> Human-in-the-loop: user removes irrelevant papers (interrupt)
+    4. gap_finder      -> Research gap identification
+    5. gap_selector    -> Human-in-the-loop: user picks a gap (interrupt)
+    6. writer          -> Outline + section-by-section writing
+    7. draft_reviewer  -> Human-in-the-loop: user edits sections (interrupt) [TODO]
+    8. critic          -> Grounding & coherence check
+    9. formatter       -> LaTeX + APA citation PDF generation
+    10. evaluator      -> Post-hoc NLI/BERTScore metrics [TODO]
 
     Flow:
-    planner -> retriever -> gap_finder -> gap_selector* -> writer
-           -> critic -> [revise loop or formatter] -> END
+    planner -> retriever -> paper_approver* -> gap_finder -> gap_selector*
+           -> writer -> critic -> [revise loop or formatter] -> END
     (* pauses for user input via LangGraph interrupt)
     """
     # Create graph
@@ -353,6 +441,7 @@ def create_graph(checkpointer=None) -> StateGraph:
     # Add nodes
     workflow.add_node("planner", planner_node)
     workflow.add_node("retriever", retriever_node)
+    workflow.add_node("paper_approver", paper_approver_node)
     workflow.add_node("gap_finder", gap_finder_node)
     workflow.add_node("gap_selector", gap_selector_node)
     workflow.add_node("writer", writer_node)
@@ -362,7 +451,8 @@ def create_graph(checkpointer=None) -> StateGraph:
     # Add edges
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "retriever")
-    workflow.add_edge("retriever", "gap_finder")
+    workflow.add_edge("retriever", "paper_approver")
+    workflow.add_edge("paper_approver", "gap_finder")
     workflow.add_edge("gap_finder", "gap_selector")
     workflow.add_edge("gap_selector", "writer")
     workflow.add_edge("writer", "critic")

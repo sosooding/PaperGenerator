@@ -16,7 +16,7 @@ from src.utils.config import Config
 
 logger = logging.getLogger(__name__)
 
-_COLLECTION_NAME = "papers"
+_DEFAULT_COLLECTION = "papers"
 
 
 def _chroma_id(paper: Paper) -> str:
@@ -58,16 +58,21 @@ def _paper_from_chroma_row(
 class VectorStore:
     """ChromaDB-backed store for paper abstracts with Google GenAI embeddings."""
 
-    def __init__(self, persist_dir: str = Config.CHROMA_DB_PATH, clear: bool = Config.CLEAR_DB_ON_RUN):
+    def __init__(
+        self,
+        persist_dir: str = Config.CHROMA_DB_PATH,
+        collection_name: str = _DEFAULT_COLLECTION,
+        clear: bool = False,
+    ):
         self.chroma = chromadb.PersistentClient(path=persist_dir)
         if clear:
             try:
-                self.chroma.delete_collection(_COLLECTION_NAME)
-                logger.info("Cleared existing ChromaDB collection '%s'", _COLLECTION_NAME)
+                self.chroma.delete_collection(collection_name)
+                logger.info("Cleared existing ChromaDB collection '%s'", collection_name)
             except Exception:
-                pass  # collection didn't exist yet
+                pass
         self.collection = self.chroma.get_or_create_collection(
-            name=_COLLECTION_NAME,
+            name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
         self._genai = genai.Client(api_key=Config.GOOGLE_API_KEY)
@@ -127,6 +132,15 @@ class VectorStore:
 
             if batch_idx + Config.BATCH_SIZE < len(valid):
                 time.sleep(Config.BATCH_DELAY_SECONDS)
+
+    def delete_papers(self, papers: List[Paper]) -> None:
+        """Delete papers from the collection by their computed IDs."""
+        ids = [_chroma_id(p) for p in papers]
+        try:
+            self.collection.delete(ids=ids)
+            logger.info("Deleted %d papers from ChromaDB", len(ids))
+        except Exception as exc:
+            logger.error("Failed to delete papers from ChromaDB: %s", exc)
 
     def similarity_search(self, query: str, k: int = Config.TOP_K_PAPERS) -> List[Paper]:
         """Return the top-k most relevant papers for a query string."""
