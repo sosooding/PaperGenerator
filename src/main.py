@@ -2,6 +2,8 @@
 Main entry point for the research paper generator.
 """
 
+import json
+
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
@@ -30,6 +32,50 @@ def _handle_interrupt(interrupt_value: dict) -> str:
             print(f"      {g['description'][:100]}")
         print()
         return input("Your choice (number): ").strip()
+
+    # Draft review interrupt
+    if "sections" in interrupt_value:
+        outline = interrupt_value.get("outline", "")
+        sections = interrupt_value["sections"]
+
+        if outline:
+            print("\nOUTLINE:")
+            print(outline)
+            print("-" * 40)
+
+        print("\nDRAFT SECTIONS:")
+        section_names = []
+        for s in sections:
+            word_count = len(s["content"].split())
+            print(f"  {s['section_name']} ({word_count} words)")
+            section_names.append(s["section_name"])
+
+        print(f"\nAvailable sections: {', '.join(section_names)}")
+        print("Enter a section name to edit it, or press Enter to finish.\n")
+
+        edits = {}
+        sections_by_name = {s["section_name"]: s for s in sections}
+
+        while True:
+            name = input("Section to edit (Enter to accept all): ").strip()
+            if not name:
+                break
+            if name not in sections_by_name:
+                print(f"  Unknown section '{name}'. Choose from: {', '.join(section_names)}")
+                continue
+            print(f"\n--- Current content of '{name}' ---")
+            print(sections_by_name[name]["content"])
+            print("--- Paste new content; end with a line containing only '---' ---")
+            lines = []
+            while True:
+                line = input()
+                if line == "---":
+                    break
+                lines.append(line)
+            edits[name] = "\n".join(lines)
+            print(f"  '{name}' updated.")
+
+        return json.dumps(edits)
 
     # Generic fallback
     return input("Your choice: ").strip()

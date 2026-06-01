@@ -413,6 +413,81 @@ def writer_node(state: AgentState) -> AgentState:
     }
 
 
+def draft_reviewer_node(state: AgentState) -> AgentState:
+    """
+    Human-in-the-loop: display outline + all draft sections and allow the user to edit any of them.
+
+    The graph pauses here via LangGraph interrupt. Resume by calling:
+        graph.invoke(Command(resume=<choice>), config=...)
+    where <choice> is a JSON-encoded dict mapping section_name -> new_content
+    (e.g. '{"abstract": "revised text..."}') or an empty string to accept all sections as-is.
+    """
+    draft_sections = list(state.get("draft_sections", []))
+    errors = list(state.get("errors", []))
+
+    if not draft_sections:
+        return {**state, "current_phase": "draft_review", "errors": errors}
+
+    section_list = [
+        {
+            "section_name": s["section_name"],
+            "content": s["content"],
+            "citations": s["citations"],
+        }
+        for s in draft_sections
+    ]
+
+    user_choice = interrupt({
+        "message": (
+            "Review the draft sections. "
+            "Enter edits as JSON {section_name: new_content}, or press Enter to accept all:"
+        ),
+        "outline": state.get("outline", ""),
+        "sections": section_list,
+    })
+
+    edited_sections: dict = {}
+    choice_str = str(user_choice).strip() if user_choice else ""
+    if choice_str:
+        try:
+            parsed = json.loads(choice_str)
+            if isinstance(parsed, dict):
+                edited_sections = {str(k): str(v) for k, v in parsed.items()}
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("draft_reviewer: could not parse user input as JSON; no edits applied")
+
+    updated_sections = [
+        {**s, "content": edited_sections[s["section_name"]]}
+        if s["section_name"] in edited_sections
+        else s
+        for s in draft_sections
+    ]
+
+    if edited_sections:
+        print(f"[DRAFT_REVIEWER] Edited sections: {list(edited_sections.keys())}")
+    else:
+        print("[DRAFT_REVIEWER] No edits; accepting all sections")
+
+    human_decisions = list(state.get("human_decisions", []))
+    human_decisions.append({
+        "checkpoint_name": "draft_review",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "approved_papers": None,
+        "removed_papers": None,
+        "selected_gap": None,
+        "edited_sections": edited_sections,
+        "notes": choice_str,
+    })
+
+    return {
+        **state,
+        "draft_sections": updated_sections,
+        "human_decisions": human_decisions,
+        "current_phase": "draft_review",
+        "errors": errors,
+    }
+
+
 def critic_node(state: AgentState) -> AgentState:
     """
     Critique draft for grounding and coherence.
@@ -491,14 +566,14 @@ def create_graph(checkpointer=None) -> StateGraph:
     4. gap_finder      -> Research gap identification
     5. gap_selector    -> Human-in-the-loop: user picks a gap (interrupt)
     6. writer          -> Outline + section-by-section writing
-    7. draft_reviewer  -> Human-in-the-loop: user edits sections (interrupt) [TODO]
+    7. draft_reviewer  -> Human-in-the-loop: user edits sections (interrupt)
     8. critic          -> Grounding & coherence check
     9. formatter       -> LaTeX + APA citation PDF generation
     10. evaluator      -> Post-hoc NLI/BERTScore metrics [TODO]
 
     Flow:
     planner -> retriever -> paper_approver* -> gap_finder -> gap_selector*
-           -> writer -> critic -> [revise loop or formatter] -> END
+           -> writer -> draft_reviewer* -> critic -> [revise loop or formatter] -> END
     (* pauses for user input via LangGraph interrupt)
     """
     # Create graph
@@ -511,6 +586,7 @@ def create_graph(checkpointer=None) -> StateGraph:
     workflow.add_node("gap_finder", gap_finder_node)
     workflow.add_node("gap_selector", gap_selector_node)
     workflow.add_node("writer", writer_node)
+    workflow.add_node("draft_reviewer", draft_reviewer_node)
     workflow.add_node("critic", critic_node)
     workflow.add_node("formatter", formatter_node)
 
@@ -521,7 +597,8 @@ def create_graph(checkpointer=None) -> StateGraph:
     workflow.add_edge("paper_approver", "gap_finder")
     workflow.add_edge("gap_finder", "gap_selector")
     workflow.add_edge("gap_selector", "writer")
-    workflow.add_edge("writer", "critic")
+    workflow.add_edge("writer", "draft_reviewer")
+    workflow.add_edge("draft_reviewer", "critic")
 
     # Conditional edge: critic -> writer (revise) or formatter (accept)
     workflow.add_conditional_edges(
