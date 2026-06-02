@@ -20,6 +20,7 @@ from src.retrieval.paper_fetcher import fetch_papers_for_queries
 from src.retrieval.vector_store import VectorStore
 from src.gap_finding.gap_analyzer import find_research_gaps
 from src.agents.interrupts import decode_draft_edits
+from src.agents.critic import _extract_citation_sentences, _check_grounding, _score_coherence
 from src.writing.writer import (
     build_source_map,
     generate_outline,
@@ -479,18 +480,49 @@ def draft_reviewer_node(state: AgentState) -> AgentState:
 
 
 def critic_node(state: AgentState) -> AgentState:
-    """
-    Critique draft for grounding and coherence.
-
-    Phase 4 will implement:
-    - Grounding check: verify each [SOURCE_ID] supports the claim
-    - Coherence check: evaluate logical flow and completeness
-    - Score 0-10
-    - Update state.critic_feedback
-    """
     logger.info("[CRITIC] Sections: %d", len(state.get("draft_sections", [])))
+    draft_sections = state.get("draft_sections", [])
+    citation_report = state.get("citation_report", {})
+    outline = state.get("outline", "")
     revision_count = state.get("revision_count", 0)
-    return {**state, "current_phase": "critiquing", "revision_count": revision_count + 1}
+    errors = list(state.get("errors", []))
+
+    llm = get_llm(temperature=0.1)
+    try:
+        pairs = _extract_citation_sentences(draft_sections)
+        flagged, grounding_score = _check_grounding(pairs, citation_report, llm)
+        coherence_score, missing_sections, coherence_issues = _score_coherence(
+            outline, draft_sections, llm
+        )
+    except Exception as exc:
+        msg = f"Critic LLM error: {exc}; using neutral scores"
+        logger.warning(msg)
+        errors.append(msg)
+        flagged, grounding_score, coherence_score = [], 5.0, 5.0
+        missing_sections, coherence_issues = [], []
+
+    score = round(0.6 * coherence_score + 0.4 * grounding_score, 2)
+    feedback = {
+        "score": score,
+        "flagged_sentences": flagged,
+        "missing_sections": missing_sections,
+        "coherence_issues": coherence_issues,
+        "grounding_score": grounding_score,
+    }
+    critic_feedback = list(state.get("critic_feedback", []))
+    critic_feedback.append(feedback)
+
+    logger.info(
+        "[CRITIC] score=%.2f grounding=%.2f flagged=%d",
+        score, grounding_score, len(flagged),
+    )
+    return {
+        **state,
+        "current_phase": "critiquing",
+        "revision_count": revision_count + 1,
+        "critic_feedback": critic_feedback,
+        "errors": errors,
+    }
 
 
 def formatter_node(state: AgentState) -> AgentState:

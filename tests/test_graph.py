@@ -250,7 +250,12 @@ def test_critic_node():
     initial_state["draft_sections"] = [
         {"section_name": "abstract", "content": "Test content", "citations": []}
     ]
-    result = critic_node(initial_state)
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(
+        content='{"score": 7.0, "missing_sections": [], "coherence_issues": []}'
+    )
+    with patch("src.agents.critic.get_llm", return_value=mock_llm):
+        result = critic_node(initial_state)
 
     assert result["current_phase"] == "critiquing"
     assert result["revision_count"] == 1
