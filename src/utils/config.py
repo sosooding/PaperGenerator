@@ -36,12 +36,15 @@ class Config:
     CHECKPOINT_DB_PATH = "checkpoints.db"
     EVAL_DB_PATH = "evaluations.db"
     CHROMA_DB_PATH = "./chroma_data"
+    OUTPUT_DIR = "./output"
 
     # Retrieval Settings
     TOP_K_PAPERS = int(os.getenv("TOP_K_PAPERS", "20"))
     MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.5"))
     ARXIV_CATEGORY_FILTERS = [
-        c.strip() for c in os.getenv("ARXIV_CATEGORY_FILTERS", "cs.DM,math.CO").split(",")
+        c.strip() for c in os.getenv(
+            "ARXIV_CATEGORY_FILTERS", "cs.DS,cs.DB,cs.DM,cs.SI,math.CO"
+        ).split(",")
     ]
     SEMANTIC_SCHOLAR_FIELD = "Mathematics"
 

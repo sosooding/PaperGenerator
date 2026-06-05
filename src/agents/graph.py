@@ -5,6 +5,7 @@ Main LangGraph workflow for research paper generation.
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
@@ -12,15 +13,15 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt
 
-from src.utils.state import AgentState, ResearchGap
+from src.utils.state import AgentState, CriticFeedback, ResearchGap
 from src.utils.config import Config
 from src.utils.llm import get_llm
 from src.utils.llm_parse import normalise_content, strip_fences
 from src.retrieval.paper_fetcher import fetch_papers_for_queries
 from src.retrieval.vector_store import VectorStore
 from src.gap_finding.gap_analyzer import find_research_gaps
+from src.agents.critic import run_grounding_check, run_coherence_check
 from src.agents.interrupts import decode_draft_edits
-from src.agents.critic import _extract_citation_sentences, _check_grounding, _score_coherence
 from src.writing.writer import (
     build_source_map,
     generate_outline,
@@ -29,6 +30,7 @@ from src.writing.writer import (
     SECTIONS,
     SECTION_RAG_SUFFIXES,
 )
+from src.formatting.formatter import format_paper
 
 logger = logging.getLogger(__name__)
 
@@ -480,64 +482,104 @@ def draft_reviewer_node(state: AgentState) -> AgentState:
 
 
 def critic_node(state: AgentState) -> AgentState:
-    logger.info("[CRITIC] Sections: %d", len(state.get("draft_sections", [])))
+    """
+    Phase 4d: critique the draft with exactly 2 LLM calls.
+
+    Call 1 — grounding check: batch all cited sentences + source excerpts into one
+    prompt; LLM returns flagged sentences and a grounding score.
+
+    Call 2 — coherence check: send truncated section excerpts + outline; LLM returns
+    coherence issues, missing sections, and a coherence score.
+
+    A BATCH_DELAY_SECONDS pause separates the two calls to respect Gemini's RPM limit.
+    On any LLM / parse failure the node falls back gracefully (score=5.0, empty lists).
+    """
     draft_sections = state.get("draft_sections", [])
     citation_report = state.get("citation_report", {})
     outline = state.get("outline", "")
-    revision_count = state.get("revision_count", 0)
     errors = list(state.get("errors", []))
+    critic_feedback = list(state.get("critic_feedback", []))
+    revision_count = state.get("revision_count", 0)
 
-    llm = get_llm(temperature=0.1)
-    try:
-        pairs = _extract_citation_sentences(draft_sections)
-        flagged, grounding_score = _check_grounding(pairs, citation_report, llm)
-        coherence_score, missing_sections, coherence_issues = _score_coherence(
-            outline, draft_sections, llm
-        )
-    except Exception as exc:
-        msg = f"Critic LLM error: {exc}; using neutral scores"
+    if not draft_sections:
+        msg = "critic_node: no draft sections; skipping critique"
         logger.warning(msg)
         errors.append(msg)
-        flagged, grounding_score, coherence_score = [], 5.0, 5.0
-        missing_sections, coherence_issues = [], []
+        return {
+            **state,
+            "current_phase": "critiquing",
+            "revision_count": revision_count + 1,
+            "errors": errors,
+        }
 
-    score = round(0.6 * coherence_score + 0.4 * grounding_score, 2)
-    feedback = {
-        "score": score,
+    logger.info("[CRITIC] Critiquing %d sections (revision %d)", len(draft_sections), revision_count + 1)
+
+    llm = get_llm(temperature=0)
+
+    # Call 1: grounding
+    flagged, grounding_score = run_grounding_check(draft_sections, citation_report, llm)
+
+    # Rate-limit pause before the second call
+    time.sleep(Config.BATCH_DELAY_SECONDS)
+
+    # Call 2: coherence
+    coherence_issues, missing_sections, coherence_score = run_coherence_check(
+        draft_sections, outline, llm
+    )
+
+    overall_score = round((grounding_score + coherence_score) / 2.0, 2)
+
+    feedback: CriticFeedback = {
+        "score": overall_score,
         "flagged_sentences": flagged,
         "missing_sections": missing_sections,
         "coherence_issues": coherence_issues,
-        "grounding_score": grounding_score,
+        "grounding_score": round(grounding_score, 2),
     }
-    critic_feedback = list(state.get("critic_feedback", []))
     critic_feedback.append(feedback)
 
     logger.info(
-        "[CRITIC] score=%.2f grounding=%.2f flagged=%d",
-        score, grounding_score, len(flagged),
+        "[CRITIC] score=%.1f (grounding=%.1f, coherence=%.1f), flagged=%d, issues=%d",
+        overall_score, grounding_score, coherence_score, len(flagged), len(coherence_issues),
     )
+
     return {
         **state,
-        "current_phase": "critiquing",
-        "revision_count": revision_count + 1,
         "critic_feedback": critic_feedback,
+        "revision_count": revision_count + 1,
+        "current_phase": "critiquing",
         "errors": errors,
     }
 
 
 def formatter_node(state: AgentState) -> AgentState:
     """
-    Format citations and generate PDF.
-
-    Phase 6 will implement:
-    - Resolve [SOURCE_ID] to full metadata
-    - Format as APA citations
-    - Assemble markdown
-    - Convert to PDF via Pandoc
-    - Update state.citation_report
+    Phase 5: assemble LaTeX + BibTeX, write output files, attempt PDF compilation.
+    Updates citation_report with tex_path, bib_path, pdf_path, reference_order, sid_to_apa.
     """
-    logger.info("[FORMATTER] Finalizing paper...")
-    return {**state, "current_phase": "formatting"}
+    draft_sections = state.get("draft_sections", [])
+    citation_report = state.get("citation_report", {})
+    research_question = state.get("research_question", "")
+    selected_gap = state.get("selected_gap")
+    gap_title = selected_gap["gap_title"] if selected_gap else research_question
+    errors = list(state.get("errors", []))
+
+    logger.info("[FORMATTER] Finalizing paper with %d sections...", len(draft_sections))
+
+    try:
+        updated_report = format_paper(
+            draft_sections=draft_sections,
+            citation_report=citation_report,
+            research_question=research_question,
+            gap_title=gap_title,
+        )
+    except Exception as exc:
+        msg = f"formatter_node: formatting failed ({exc})"
+        logger.error(msg)
+        errors.append(msg)
+        updated_report = citation_report
+
+    return {**state, "citation_report": updated_report, "current_phase": "formatting", "errors": errors}
 
 
 # ============================================================================

@@ -16,8 +16,8 @@ from src.utils.config import Config
 
 logger = logging.getLogger(__name__)
 
-# Shared client so delay_seconds is enforced across all sub-query calls, not just within one.
-_arxiv_client = arxiv.Client(page_size=10, delay_seconds=5.0, num_retries=3)
+# num_retries=0 so tenacity (not arxiv's internal retry) owns all retry+backoff logic.
+_arxiv_client = arxiv.Client(page_size=10, delay_seconds=5.0, num_retries=0)
 
 
 def _paper_unique_key(doi: Optional[str], title: str) -> str:
@@ -36,7 +36,7 @@ def _author_name(author) -> Optional[str]:
 
 @retry(
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=2, min=5, max=60),
+    wait=wait_exponential(multiplier=3, min=15, max=120),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
@@ -81,14 +81,14 @@ def fetch_arxiv_papers(query: str, max_results: int = 15) -> List[Paper]:
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=10, max=60),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
 def fetch_semantic_scholar_papers(query: str, max_results: int = 20) -> List[Paper]:
-    """Fetch papers from Semantic Scholar in the Mathematics field."""
-    sch = SemanticScholar()
+    """Fetch papers from Semantic Scholar."""
+    sch = SemanticScholar(timeout=20, retry=False)
 
     results = sch.search_paper(
         query,
@@ -139,7 +139,7 @@ def fetch_papers_for_queries(
 
         for fetcher, source_name in [
             (fetch_arxiv_papers, "ArXiv"),
-            # (fetch_semantic_scholar_papers, "Semantic Scholar"),  # disabled: ConnectionRefusedError
+            (fetch_semantic_scholar_papers, "Semantic Scholar"),
         ]:
             try:
                 batch = fetcher(query, max_results=papers_per_query)
@@ -150,6 +150,9 @@ def fetch_papers_for_queries(
                         all_papers.append(paper)
             except Exception as exc:
                 logger.warning("%s fetch failed for query %r: %s", source_name, query, exc)
+
+            # Respect inter-source rate limits
+            time.sleep(3)
 
         # Avoid hammering the APIs between queries
         time.sleep(5)

@@ -1,128 +1,187 @@
 """
-Critic node helpers for Phase 4d.
+Phase 4d: critic node helpers — grounding check and coherence check.
+
+Exactly 2 LLM calls per critique cycle to stay within Gemini's RPM limit.
 """
 
 import json
 import logging
 import re
-import time
 from typing import Any, Dict, List, Tuple
 
-from langchain_core.messages import HumanMessage
-
-from src.utils.llm import get_llm
 from src.utils.llm_parse import normalise_content, strip_fences
+from src.utils.state import DraftSection
 
 logger = logging.getLogger(__name__)
 
-_CITATION_RE = re.compile(r'\[S(\d+)\]')
-_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+_MAX_CITED_SENTENCES = 50   # cap sent to LLM so prompt stays reasonable
+_MAX_ABSTRACT_CHARS = 300   # abstract excerpt per source
+_MAX_SECTION_CHARS = 800    # section excerpt per section for coherence check
+_MAX_SENTENCE_CHARS = 300   # per-sentence cap in grounding prompt
 
-_GROUNDING_PROMPT = (
-    "You are a fact-checking assistant.\n\n"
-    "Abstract:\n{abstract}\n\n"
-    "Claim:\n{sentence}\n\n"
-    "Does this abstract directly support this claim?\n"
-    "Answer YES or NO on the first line, then a one-sentence reason."
-)
+_GROUNDING_PROMPT = """\
+You are a critical reviewer of an academic research paper on graph theory.
 
-_COHERENCE_PROMPT = (
-    "You are an academic paper reviewer.\n\n"
-    "OUTLINE:\n{outline}\n\n"
-    "SECTIONS:\n{sections_text}\n\n"
-    "Evaluate the logical flow and completeness of this research paper draft.\n"
-    "Return ONLY valid JSON (no markdown fences):\n"
-    '{{"score": <float 0-10>, "missing_sections": ["..."], "coherence_issues": ["..."]}}'
-)
+Task: identify sentences that misrepresent or hallucinate claims not supported by \
+their cited source.
+
+SOURCES (title + abstract excerpt):
+{source_excerpts}
+
+CITED SENTENCES (format: index. [section] "sentence"):
+{cited_sentences}
+
+Return ONLY valid JSON — no markdown fences, no explanation:
+{{
+  "grounding_score": <float 0-10, where 10 = every citation is accurate>,
+  "flagged": [
+    {{"sentence": "<exact sentence>", "issue": "<one sentence explaining mismatch>", \
+"source_id": "<Sx>"}},
+    ...
+  ]
+}}
+Cap flagged to at most 10 items. If all citations are accurate, return an empty flagged list.\
+"""
+
+_COHERENCE_PROMPT = """\
+You are a critical reviewer of an academic research paper on graph theory.
+
+Task: evaluate the logical flow, internal consistency, and completeness of the paper.
+
+PAPER OUTLINE:
+{outline}
+
+PAPER SECTIONS (excerpts in order):
+{sections_text}
+
+Return ONLY valid JSON — no markdown fences, no explanation:
+{{
+  "coherence_score": <float 0-10, where 10 = excellent logical flow>,
+  "coherence_issues": ["<issue 1>", ...],
+  "missing_sections": ["<section name>", ...]
+}}
+Cap coherence_issues to at most 5 items. \
+List a section in missing_sections only if it is truly absent or completely empty.\
+"""
 
 
-def _extract_citation_sentences(
-    sections: List[Dict[str, Any]],
-) -> List[Tuple[str, str, str]]:
-    """
-    Returns (sentence, source_id, section_name) for every [Sx] tag found.
-    A sentence with two tags produces two tuples.
-    """
-    results = []
-    for section in sections:
+def _extract_cited_sentences(draft_sections: List[DraftSection]) -> List[Dict[str, str]]:
+    """Pull sentences containing at least one [Sx] citation from all sections."""
+    result: List[Dict[str, str]] = []
+    for section in draft_sections:
         content = section.get("content", "")
-        section_name = section.get("section_name", "")
-        sentences = _SENTENCE_SPLIT_RE.split(content)
-        for sentence in sentences:
-            for match in _CITATION_RE.finditer(sentence):
-                source_id = "S" + match.group(1)
-                results.append((sentence.strip(), source_id, section_name))
-    return results
+        for sent in re.split(r"(?<=[.!?])\s+", content):
+            if re.search(r"\[S\d+\]", sent):
+                result.append({
+                    "section": section["section_name"],
+                    "sentence": sent.strip()[:_MAX_SENTENCE_CHARS],
+                })
+    return result
 
 
-def _check_grounding(
-    pairs: List[Tuple[str, str, str]],
+def _format_source_excerpts(citation_report: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    for sid, paper in citation_report.items():
+        if not isinstance(paper, dict):
+            lines.append(f"[{sid}] {paper}")
+            continue
+        title = paper.get("title", "Untitled")
+        abstract = (paper.get("abstract") or "")[:_MAX_ABSTRACT_CHARS]
+        doi = paper.get("doi", "")
+        doi_str = f"  DOI: {doi}" if doi else ""
+        lines.append(f"[{sid}] {title}{doi_str}\nAbstract: {abstract}")
+    return "\n\n".join(lines) if lines else "(No sources available)"
+
+
+def _clamp_score(value: Any) -> float:
+    try:
+        return max(0.0, min(10.0, float(value)))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def run_grounding_check(
+    draft_sections: List[DraftSection],
     citation_report: Dict[str, Any],
     llm,
 ) -> Tuple[List[Dict[str, str]], float]:
     """
-    For each (sentence, source_id) pair, ask the LLM whether the abstract
-    supports the claim. Returns (flagged_sentences, grounding_score 0-10).
+    1 LLM call: verify cited sentences are supported by their sources.
+    Returns (flagged_sentences, grounding_score).
+    Fallback: ([], 5.0) on any error.
     """
-    flagged: List[Dict[str, str]] = []
-    supported = 0
-    total = 0
+    cited = _extract_cited_sentences(draft_sections)
+    if not cited:
+        logger.info("[CRITIC] No cited sentences found; grounding score defaults to 10.0")
+        return [], 10.0
 
-    for sentence, source_id, _section in pairs:
-        paper = citation_report.get(source_id)
-        if not paper:
-            continue
-        abstract = (paper.get("abstract") or "").strip()
-        if not abstract:
-            continue
-
-        total += 1
-        # TODO(Option C): batch all claims into a single LLM call to avoid rate-limit delays
-        if total > 1:
-            time.sleep(4)  # stay under 15 req/min free-tier limit
-        prompt = _GROUNDING_PROMPT.format(abstract=abstract, sentence=sentence)
-        response = llm.invoke([HumanMessage(content=prompt)])
-        text = normalise_content(response.content)
-        first_line = text.splitlines()[0].strip().upper() if text.strip() else ""
-
-        if first_line.startswith("NO"):
-            lines = text.splitlines()
-            reason = lines[1].strip() if len(lines) > 1 else "Unsupported claim."
-            flagged.append({"sentence": sentence, "issue": reason, "source_id": source_id})
-        else:
-            supported += 1
-
-    grounding_score = (supported / total * 10.0) if total > 0 else 10.0
-    return flagged, grounding_score
-
-
-def _score_coherence(
-    outline: str,
-    sections: List[Dict[str, Any]],
-    llm,
-) -> Tuple[float, List[str], List[str]]:
-    """
-    Ask the LLM to score the draft's coherence and completeness (0-10).
-    Returns (coherence_score, missing_sections, coherence_issues).
-    """
-    sections_text = "\n\n".join(
-        f"### {s.get('section_name', '').upper()}\n{s.get('content', '')}"
-        for s in sections
+    source_excerpts = _format_source_excerpts(citation_report)
+    numbered = "\n".join(
+        f'{i + 1}. [{s["section"]}] "{s["sentence"]}"'
+        for i, s in enumerate(cited[:_MAX_CITED_SENTENCES])
     )
-    prompt = _COHERENCE_PROMPT.format(
-        outline=outline or "(no outline)",
-        sections_text=sections_text or "(no sections)",
+
+    prompt = _GROUNDING_PROMPT.format(
+        source_excerpts=source_excerpts,
+        cited_sentences=numbered,
     )
-    response = llm.invoke([HumanMessage(content=prompt)])
-    text = strip_fences(normalise_content(response.content))
 
     try:
-        parsed = json.loads(text)
-        score = float(parsed.get("score", 5.0))
-        missing = list(parsed.get("missing_sections", []))
-        issues = list(parsed.get("coherence_issues", []))
-        return max(0.0, min(10.0, score)), missing, issues
-    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
-        m = re.search(r'"?score"?\s*[:\s]\s*([0-9]+(?:\.[0-9]+)?)', text, re.IGNORECASE)
-        score = float(m.group(1)) if m else 5.0
-        return max(0.0, min(10.0, score)), [], []
+        response = llm.invoke(prompt)
+        data = json.loads(strip_fences(normalise_content(response.content)))
+        flagged = [
+            {
+                "sentence": str(f.get("sentence", "")),
+                "issue": str(f.get("issue", "")),
+                "source_id": str(f.get("source_id", "")),
+            }
+            for f in data.get("flagged", [])
+            if isinstance(f, dict)
+        ]
+        score = _clamp_score(data.get("grounding_score", 5.0))
+        logger.info("[CRITIC] Grounding score=%.1f, flagged=%d", score, len(flagged))
+        return flagged, score
+    except Exception as exc:
+        logger.error("[CRITIC] Grounding check failed (%s); defaulting to score=5.0", exc)
+        return [], 5.0
+
+
+def run_coherence_check(
+    draft_sections: List[DraftSection],
+    outline: str,
+    llm,
+) -> Tuple[List[str], List[str], float]:
+    """
+    1 LLM call: evaluate logical flow and completeness across all sections.
+    Returns (coherence_issues, missing_sections, coherence_score).
+    Fallback: ([], [], 5.0) on any error.
+    """
+    if not draft_sections:
+        logger.warning("[CRITIC] No draft sections; coherence score defaults to 5.0")
+        return [], [], 5.0
+
+    sections_text = "\n\n".join(
+        f"## {s['section_name'].replace('_', ' ').title()}\n"
+        f"{s.get('content', '')[:_MAX_SECTION_CHARS]}"
+        for s in draft_sections
+    )
+
+    prompt = _COHERENCE_PROMPT.format(
+        outline=outline or "(No outline available)",
+        sections_text=sections_text,
+    )
+
+    try:
+        response = llm.invoke(prompt)
+        data = json.loads(strip_fences(normalise_content(response.content)))
+        coherence_issues = [str(x) for x in data.get("coherence_issues", []) if x]
+        missing_sections = [str(x) for x in data.get("missing_sections", []) if x]
+        score = _clamp_score(data.get("coherence_score", 5.0))
+        logger.info(
+            "[CRITIC] Coherence score=%.1f, issues=%d, missing=%s",
+            score, len(coherence_issues), missing_sections,
+        )
+        return coherence_issues, missing_sections, score
+    except Exception as exc:
+        logger.error("[CRITIC] Coherence check failed (%s); defaulting to score=5.0", exc)
+        return [], [], 5.0

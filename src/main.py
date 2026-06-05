@@ -2,6 +2,7 @@
 Main entry point for the research paper generator.
 """
 
+import hashlib
 import json
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -10,6 +11,12 @@ from langgraph.types import Command
 from src.agents.graph import create_graph, get_initial_state
 from src.agents.interrupts import encode_draft_edits
 from src.utils.config import Config
+
+
+def _thread_id(research_question: str) -> str:
+    """Stable, human-readable thread ID scoped to a research question."""
+    digest = hashlib.md5(research_question.strip().lower().encode()).hexdigest()[:8]
+    return f"run-{digest}"
 
 
 def _handle_interrupt(interrupt_value: dict) -> str:
@@ -99,7 +106,7 @@ def main():
     with SqliteSaver.from_conn_string(Config.CHECKPOINT_DB_PATH) as checkpointer:
         graph = create_graph(checkpointer=checkpointer)
         initial_state = get_initial_state(research_question)
-        config = {"configurable": {"thread_id": "run-1"}}
+        config = {"configurable": {"thread_id": _thread_id(research_question)}}
 
         print("Starting workflow...\n" + "-" * 80)
 
@@ -133,6 +140,16 @@ def main():
                 print(f"\nCheckpoints : {len(decisions)}")
                 for d in decisions:
                     print(f"  - {d['checkpoint_name']} @ {d['timestamp']}")
+
+            citation_report = result.get("citation_report", {})
+            if citation_report.get("tex_path"):
+                print(f"\nOutput files:")
+                print(f"  LaTeX : {citation_report['tex_path']}")
+                print(f"  BibTeX: {citation_report['bib_path']}")
+                if citation_report.get("pdf_path"):
+                    print(f"  PDF   : {citation_report['pdf_path']}")
+                else:
+                    print(f"  PDF   : (pdflatex not available)")
 
             if result.get("errors"):
                 print(f"\nErrors ({len(result['errors'])}):")
